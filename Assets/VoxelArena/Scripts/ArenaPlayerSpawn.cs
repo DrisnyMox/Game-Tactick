@@ -115,8 +115,8 @@ public class ArenaPlayerSpawn : MonoBehaviour
 
     void OnGUI()
     {
-        // OnGUI рисуется поверх любого Canvas: под экраном загрузки надписи не нужны
-        if (ArenaLoadingScreen.IsShown)
+        // OnGUI рисуется поверх любого Canvas: под экраном загрузки и меню настроек надписи не нужны
+        if (ArenaLoadingScreen.IsShown || SettingsMenu.IsOpen)
             return;
         int fontSize = Mathf.Clamp(Screen.height / 30, 12, 32);
         style ??= new GUIStyle(GUI.skin.label);

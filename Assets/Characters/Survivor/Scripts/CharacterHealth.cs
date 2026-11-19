@@ -53,6 +53,15 @@ public class CharacterHealth : MonoBehaviour, IShootable
 
     public bool IsHead(Collider collider) => collider.transform == head;
 
+    // Play Mode входит без перезагрузки домена (Enter Play Mode Settings): статика прошлого запуска
+    // не обнуляется сама. Сброс до Awake сцены
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetStatics()
+    {
+        all.Clear();
+        Killed = null;
+    }
+
     void Awake()
     {
         animator = GetComponent<Animator>();

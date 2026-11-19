@@ -110,8 +110,8 @@ public class ArenaTestController : MonoBehaviour
     {
         fps = Mathf.Lerp(fps, 1f / Mathf.Max(Time.unscaledDeltaTime, 0.0001f), 0.05f);
 
-        // Под экраном загрузки камера и взрывы не нужны
-        if (arena.IsGenerating)
+        // Под экраном загрузки камера и взрывы не нужны; в меню настроек клик по нему — не взрыв
+        if (arena.IsGenerating || SettingsMenu.IsOpen)
             return;
 
         HandlePinch();
@@ -427,8 +427,8 @@ public class ArenaTestController : MonoBehaviour
 
     void OnGUI()
     {
-        // OnGUI рисуется поверх любого Canvas: под экраном загрузки надписи не нужны
-        if (ArenaLoadingScreen.IsShown)
+        // OnGUI рисуется поверх любого Canvas: под экраном загрузки и меню настроек надписи не нужны
+        if (ArenaLoadingScreen.IsShown || SettingsMenu.IsOpen)
             return;
         int fontSize = Mathf.Clamp(Mathf.Min(Screen.width, Screen.height) / 55, 10, 28);
         GUI.skin.label.fontSize = fontSize;

@@ -54,8 +54,8 @@ public class KillFeed : MonoBehaviour
 
     void OnGUI()
     {
-        // OnGUI рисуется поверх любого Canvas: под экраном загрузки надписи не нужны
-        if (ArenaLoadingScreen.IsShown)
+        // OnGUI рисуется поверх любого Canvas: под экраном загрузки и меню настроек надписи не нужны
+        if (ArenaLoadingScreen.IsShown || SettingsMenu.IsOpen)
             return;
         // Циклом, а не RemoveAll с лямбдой: лямбда, которая читает поле, выделяет память при каждом вызове
         for (int i = lines.Count - 1; i >= 0; i--)

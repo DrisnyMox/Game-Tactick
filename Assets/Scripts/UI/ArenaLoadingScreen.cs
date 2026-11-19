@@ -30,6 +30,10 @@ public class ArenaLoadingScreen : MonoBehaviour
     string shownStage;
     int shownPercent = -1;
 
+    // Play Mode входит без перезагрузки домена (Enter Play Mode Settings): флаг прошлого запуска сам не обнуляется
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetStatics() => IsShown = false;
+
     void Awake()
     {
         // До первой генерации земли нет: экран с самого первого кадра, до первого шага физики
