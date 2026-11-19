@@ -11,11 +11,13 @@ using static VoxelBlocks;
 public static class ArenaDecorator
 {
     /// <summary>
-    /// Координаты всех построек — в клетках раскладки; клетка пишется кубом cellVoxels³ вокселей
+    /// Запускает джобу построек после dependsOn. Координаты всех построек — в клетках раскладки;
+    /// клетка пишется кубом cellVoxels³ вокселей
     /// </summary>
-    public static void Decorate(NativeArray<byte> voxels, int3 dims, int cellVoxels, ArenaLayout layout, ArenaBiome biome, int seed, int wallHeight)
+    public static JobHandle Schedule(NativeArray<byte> voxels, int3 dims, int cellVoxels, ArenaLayout layout, ArenaBiome biome,
+        int seed, int wallHeight, JobHandle dependsOn)
     {
-        new DecorateJob
+        return new DecorateJob
         {
             voxels = voxels,
             dims = dims,
@@ -29,7 +31,7 @@ public static class ArenaDecorator
             biome = biome,
             seed = seed,
             wallHeight = wallHeight,
-        }.Run();
+        }.Schedule(dependsOn);
     }
 
     // Постройки идут по порядку: их форма зависит от общей последовательности случайных чисел.

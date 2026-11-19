@@ -116,7 +116,45 @@ public static class ArenaLayoutGenerator
     const int InfoBaseAx = 0, InfoBaseAz = 1, InfoBaseBx = 2, InfoBaseBz = 3, InfoGateSide = 4,
               InfoRegions = 5, InfoRamps = 6, InfoFlattened = 7, InfoConnected = 8, InfoCaptures = 9, InfoCount = 10;
 
-    public static ArenaLayout Generate(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ)
+    /// <summary>Раскладка, джобы которой запущены: Finish ждёт их и отдаёт готовую раскладку</summary>
+    public sealed class Pending
+    {
+        internal ArenaLayout layout;
+        internal NativeArray<float4> noiseMaps;
+        internal NativeArray<int> info;
+        internal NativeArray<float2> axis;
+        internal JobHandle handle;
+
+        public bool IsCompleted => handle.IsCompleted;
+
+        public ArenaLayout Finish()
+        {
+            handle.Complete();
+            layout.baseOne = new int2(info[InfoBaseAx], info[InfoBaseAz]);
+            layout.baseTwo = new int2(info[InfoBaseBx], info[InfoBaseBz]);
+            layout.gateSide = info[InfoGateSide];
+            layout.baseAxis = axis[0];
+            layout.regionCount = info[InfoRegions];
+            layout.rampCount = info[InfoRamps];
+            layout.flattenedRegions = info[InfoFlattened];
+            layout.basesConnected = info[InfoConnected] != 0;
+            layout.capturePointsReachable = info[InfoCaptures] != 0;
+
+            noiseMaps.Dispose();
+            info.Dispose();
+            axis.Dispose();
+            return layout;
+        }
+    }
+
+    public static ArenaLayout Generate(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ) =>
+        Schedule(settings, biome, sizeX, sizeY, sizeZ).Finish();
+
+    /// <summary>
+    /// Запускает джобы раскладки и сразу возвращается. Память джоб — Persistent: раскладку можно ждать
+    /// много кадров (экран загрузки), а TempJob живёт не больше четырёх
+    /// </summary>
+    public static Pending Schedule(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ)
     {
         var layout = new ArenaLayout(sizeX, sizeZ);
         int n = sizeX * sizeZ;
@@ -128,9 +166,9 @@ public static class ArenaLayoutGenerator
         var mountainOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
         var borderOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
 
-        var noiseMaps = new NativeArray<float4>(n, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        var info = new NativeArray<int>(InfoCount, Allocator.TempJob);
-        var axis = new NativeArray<float2>(1, Allocator.TempJob);
+        var noiseMaps = new NativeArray<float4>(n, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+        var info = new NativeArray<int>(InfoCount, Allocator.Persistent);
+        var axis = new NativeArray<float2>(1, Allocator.Persistent);
 
         var noiseHandle = new SymmetricNoiseJob
         {
@@ -144,7 +182,7 @@ public static class ArenaLayoutGenerator
             maps = noiseMaps,
         }.Schedule((n + 1) / 2, 256);
 
-        new BuildLayoutJob
+        var handle = new BuildLayoutJob
         {
             s = settings,
             waterBonus = ArenaBiomes.WaterThresholdBonus(biome),
@@ -167,22 +205,10 @@ public static class ArenaLayoutGenerator
             outRocks = layout.rocks,
             outInfo = info,
             outAxis = axis,
-        }.Schedule(noiseHandle).Complete();
+        }.Schedule(noiseHandle);
+        JobHandle.ScheduleBatchedJobs();
 
-        layout.baseOne = new int2(info[InfoBaseAx], info[InfoBaseAz]);
-        layout.baseTwo = new int2(info[InfoBaseBx], info[InfoBaseBz]);
-        layout.gateSide = info[InfoGateSide];
-        layout.baseAxis = axis[0];
-        layout.regionCount = info[InfoRegions];
-        layout.rampCount = info[InfoRamps];
-        layout.flattenedRegions = info[InfoFlattened];
-        layout.basesConnected = info[InfoConnected] != 0;
-        layout.capturePointsReachable = info[InfoCaptures] != 0;
-
-        noiseMaps.Dispose();
-        info.Dispose();
-        axis.Dispose();
-        return layout;
+        return new Pending { layout = layout, noiseMaps = noiseMaps, info = info, axis = axis, handle = handle };
     }
 
     static float Fbm(float2 p, float scale, int octaves, float2 offset)

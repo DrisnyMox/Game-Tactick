@@ -110,6 +110,10 @@ public class ArenaTestController : MonoBehaviour
     {
         fps = Mathf.Lerp(fps, 1f / Mathf.Max(Time.unscaledDeltaTime, 0.0001f), 0.05f);
 
+        // Под экраном загрузки камера и взрывы не нужны
+        if (arena.IsGenerating)
+            return;
+
         HandlePinch();
         HandlePointer();
         HandleKeys();
@@ -371,12 +375,14 @@ public class ArenaTestController : MonoBehaviour
 
     void Regenerate()
     {
+        if (arena.IsGenerating)
+            return;
         foreach (var agent in agents)
             Destroy(agent.gameObject);
         agents.Clear();
 
         arena.Seed = Random.Range(1, 100000);
-        arena.Generate();
+        arena.StartGeneration();
     }
 
     void SpawnAgents()
@@ -421,6 +427,9 @@ public class ArenaTestController : MonoBehaviour
 
     void OnGUI()
     {
+        // OnGUI рисуется поверх любого Canvas: под экраном загрузки надписи не нужны
+        if (ArenaLoadingScreen.IsShown)
+            return;
         int fontSize = Mathf.Clamp(Mathf.Min(Screen.width, Screen.height) / 55, 10, 28);
         GUI.skin.label.fontSize = fontSize;
         GUI.skin.button.fontSize = fontSize;

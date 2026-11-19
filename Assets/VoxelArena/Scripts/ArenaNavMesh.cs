@@ -81,6 +81,8 @@ public class ArenaNavMesh : MonoBehaviour
     readonly List<int> runningRegions = new();
     // Сборка после генерации: все области разом, потом связки всех швов
     bool fullBuild;
+    // Сборок в полной сборке (области × типы агентов): по ним считается FullBuildProgress
+    int fullBuildTotal;
 
     // Источники одной сборки. Каждая сборка получает свой список: сборки после генерации идут одновременно
     readonly List<List<NavMeshBuildSource>> sourceLists = new();
@@ -119,6 +121,25 @@ public class ArenaNavMesh : MonoBehaviour
     /// <summary>NavMesh собран для всех типов агентов</summary>
     public bool HasNavMesh { get; private set; }
     public bool IsBusy => running.Count > 0 || regionQueue.Count > 0;
+
+    /// <summary>
+    /// Готовность сборки всей арены после генерации, от 0 до 1: доля собранных областей с долей идущих.
+    /// Связки швов ставятся в последнем кадре, уже при 1
+    /// </summary>
+    public float FullBuildProgress
+    {
+        get
+        {
+            if (HasNavMesh)
+                return 1f;
+            if (!fullBuild || !fullTimer.IsRunning)
+                return 0f;
+            float done = fullBuildTotal - running.Count;
+            foreach (var operation in running)
+                done += operation.progress;
+            return done / fullBuildTotal;
+        }
+    }
     /// <summary>Последняя сборка одной области (оба типа агента)</summary>
     public double LastBuildMs { get; private set; }
     public int LastBuildFrames { get; private set; }
@@ -137,12 +158,14 @@ public class ArenaNavMesh : MonoBehaviour
     {
         arena = GetComponent<VoxelArena>();
         arena.ChunkMeshChanged += Chunk_MeshChanged;
+        arena.GenerationStarted += Arena_GenerationStarted;
         arena.Generated += Arena_Generated;
     }
 
     void OnDestroy()
     {
         arena.ChunkMeshChanged -= Chunk_MeshChanged;
+        arena.GenerationStarted -= Arena_GenerationStarted;
         arena.Generated -= Arena_Generated;
 
         if (layers == null)
@@ -257,6 +280,18 @@ public class ArenaNavMesh : MonoBehaviour
         regionQueue.Enqueue(region);
     }
 
+    // Генерация пошла: NavMesh старой карты больше не годится, очередь её областей не нужна. Пока генерация идёт,
+    // Update ничего не собирает: связки швов читают воксели, которые сейчас пишут джобы генерации
+    void Arena_GenerationStarted()
+    {
+        HasNavMesh = false;
+        regionQueue.Clear();
+        if (regions == null)
+            return;
+        foreach (var region in regions)
+            region.queued = false;
+    }
+
     // Новая карта: все области разом, а очередь с прошлой карты не нужна
     void Arena_Generated()
     {
@@ -265,6 +300,8 @@ public class ArenaNavMesh : MonoBehaviour
 
         HasNavMesh = false;
         fullBuild = true;
+        // Полная сборка прошлой карты могла не закончиться: её сборки доходят, а эта начнётся заново
+        fullTimer.Reset();
         regionQueue.Clear();
         foreach (var region in regions)
             region.queued = false;
@@ -272,7 +309,7 @@ public class ArenaNavMesh : MonoBehaviour
 
     void Update()
     {
-        if (layers == null)
+        if (layers == null || arena.IsGenerating)
             return;
 
         for (int i = running.Count - 1; i >= 0; i--)
@@ -311,6 +348,7 @@ public class ArenaNavMesh : MonoBehaviour
                 return;
             }
             fullTimer.Restart();
+            fullBuildTotal = regions.Length * layers.Length;
             for (int r = 0; r < regions.Length; r++)
                 StartRegion(r);
             return;

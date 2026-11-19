@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using Unity.Burst;
@@ -40,6 +41,15 @@ public class VoxelArena : MonoBehaviour
     /// <summary>Меши чанка изменились: форма суши, вода (null — пусто), матрица чанка.</summary>
     public event Action<int, Mesh, Mesh, Matrix4x4> ChunkMeshChanged;
     public event Action Generated;
+    /// <summary>Началась генерация новой карты: до Generated воксели и меши чанков заняты ею</summary>
+    public event Action GenerationStarted;
+
+    /// <summary>Идёт генерация карты (StartGeneration растягивает её на несколько кадров)</summary>
+    public bool IsGenerating { get; private set; }
+    /// <summary>Готовность идущей генерации, от 0 до 1</summary>
+    public float GenerationProgress { get; private set; }
+    /// <summary>Шаг идущей генерации для экрана загрузки</summary>
+    public string GenerationStage { get; private set; }
 
     /// <summary>Выбитый воксель: клетка и блок, который в ней был</summary>
     public struct RemovedVoxel
@@ -148,6 +158,8 @@ public class VoxelArena : MonoBehaviour
         public Mesh.MeshDataArray data;
         public JobHandle handle;
         public int start, count;
+        // Джоба запущена, данные ещё не загружены в меши: tasks и data заняты
+        public bool scheduled;
     }
 
     // Две пачки: пока одна загружается в Unity, рабочие потоки строят меши другой
@@ -180,6 +192,15 @@ public class VoxelArena : MonoBehaviour
 
     readonly Stopwatch timer = new();
     readonly Stopwatch generateTimer = new();
+
+    // Генерация по кадрам: её джобы и их память. Если арену уничтожат посреди генерации (выход из Play Mode
+    // на экране загрузки), OnDestroy дожидается джоб и освобождает память
+    ArenaLayoutGenerator.Pending pendingLayout;
+    JobHandle generationJobs;
+    NativeArray<int> genWaterTop;
+    NativeArray<byte> genFlags;
+    NativeArray<int3> rebuildOrigins;
+    NativeArray<byte> rebuildFaces;
 
     void Awake()
     {
@@ -219,18 +240,20 @@ public class VoxelArena : MonoBehaviour
 
     void Start()
     {
-        Generate();
+        StartGeneration();
     }
 
     void LateUpdate()
     {
-        // Все правки за кадр перестраиваются одной пачкой
-        if (dirtyChunks.Count > 0)
+        // Все правки за кадр перестраиваются одной пачкой. Во время генерации чанки перестраивает она
+        if (dirtyChunks.Count > 0 && !IsGenerating)
             RebuildDirtyChunks();
     }
 
     void OnDestroy()
     {
+        if (IsGenerating)
+            AbortGeneration();
         voxels.Dispose();
         columnHeight.Dispose();
         faceColors.Dispose();
@@ -254,8 +277,55 @@ public class VoxelArena : MonoBehaviour
         Destroy(paletteTexture);
     }
 
+    /// <summary>
+    /// Генерирует карту за несколько кадров: пока джобы считают, кадры идут, и экран загрузки показывает
+    /// GenerationStage и GenerationProgress. По готовности — событие Generated
+    /// </summary>
+    public void StartGeneration()
+    {
+        if (IsGenerating)
+            throw new InvalidOperationException("Карта уже генерируется");
+        StartCoroutine(GenerateSteps(true));
+    }
+
+    /// <summary>Генерирует карту сразу, в этом же вызове</summary>
+    // Джобы генерации читают и пишут воксели: сначала они должны закончиться
+    void AbortGeneration()
+    {
+        pendingLayout?.Finish().Dispose();
+        generationJobs.Complete();
+        foreach (var batch in meshBatches)
+        {
+            if (!batch.scheduled)
+                continue;
+            batch.handle.Complete();
+            batch.tasks.Dispose();
+            batch.data.Dispose();
+        }
+        if (genWaterTop.IsCreated) genWaterTop.Dispose();
+        if (genFlags.IsCreated) genFlags.Dispose();
+        if (rebuildOrigins.IsCreated) rebuildOrigins.Dispose();
+        if (rebuildFaces.IsCreated) rebuildFaces.Dispose();
+    }
+
     public void Generate()
     {
+        if (IsGenerating)
+            throw new InvalidOperationException("Карта уже генерируется");
+        var steps = GenerateSteps(false);
+        while (steps.MoveNext()) { }
+    }
+
+    // Доли шагов в GenerationProgress: раскладка, воксели, меши чанков, склейка узлов
+    const float VoxelsFrom = 0.15f, MeshesFrom = 0.25f, CombineFrom = 0.9f;
+
+    // spread — ждать джобы, отпуская кадры (yield), а не останавливая главный поток
+    IEnumerator GenerateSteps(bool spread)
+    {
+        IsGenerating = true;
+        GenerationProgress = 0f;
+        GenerationStage = "Раскладка карты";
+        GenerationStarted?.Invoke();
         generateTimer.Restart();
 
         if (ChunkSize % cellVoxels != 0)
@@ -263,14 +333,23 @@ public class VoxelArena : MonoBehaviour
 
         Biome = ArenaBiomes.Resolve(generation.biome, generation.seed);
         int k = cellVoxels;
-        // Раскладка прошлой карты (null — карта первая)
+        pendingLayout = ArenaLayoutGenerator.Schedule(generation, Biome, dims.x / k, dims.y / k, dims.z / k);
+        if (spread)
+            while (!pendingLayout.IsCompleted)
+                yield return null;
+        // Раскладка прошлой карты (null — карта первая) нужна до готовности новой
+        var layout = pendingLayout.Finish();
+        pendingLayout = null;
         Layout?.Dispose();
-        Layout = ArenaLayoutGenerator.Generate(generation, Biome, dims.x / k, dims.y / k, dims.z / k);
+        Layout = layout;
         double layoutMs = generateTimer.Elapsed.TotalMilliseconds;
 
+        GenerationStage = "Воксели";
+        GenerationProgress = VoxelsFrom;
         int columns = dims.x * dims.z;
-        var waterTop = new NativeArray<int>(columns, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        var flags = new NativeArray<byte>(columns, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        // Persistent: джобы могут идти дольше четырёх кадров, которые живёт TempJob
+        genWaterTop = new NativeArray<int>(columns, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+        genFlags = new NativeArray<byte>(columns, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
 
         var expand = new ExpandLayoutJob
         {
@@ -282,26 +361,30 @@ public class VoxelArena : MonoBehaviour
             cellWaterTop = Layout.waterTop,
             cellFlags = Layout.flags,
             height = columnHeight,
-            waterTop = waterTop,
-            flags = flags,
+            waterTop = genWaterTop,
+            flags = genFlags,
         }.Schedule(columns, dims.x);
 
-        new ArenaGenerateJob
+        var fill = new ArenaGenerateJob
         {
             dims = dims,
             snowLine = ArenaBiomes.SnowLine(Biome, generation.highHeight) * k,
             height = columnHeight,
-            waterTop = waterTop,
-            flags = flags,
+            waterTop = genWaterTop,
+            flags = genFlags,
             voxels = voxels,
-        }
-        .Schedule(columns, dims.x, expand)
-        .Complete();
+        }.Schedule(columns, dims.x, expand);
 
-        waterTop.Dispose();
-        flags.Dispose();
+        generationJobs = ArenaDecorator.Schedule(voxels, dims, cellVoxels, Layout, Biome, generation.seed, generation.wallHeight, fill);
+        JobHandle.ScheduleBatchedJobs();
+        if (spread)
+            while (!generationJobs.IsCompleted)
+                yield return null;
+        generationJobs.Complete();
 
-        ArenaDecorator.Decorate(voxels, dims, cellVoxels, Layout, Biome, generation.seed, generation.wallHeight);
+        genWaterTop.Dispose();
+        genFlags.Dispose();
+
         VoxelBlocks.WritePalette(paletteTexture, ArenaBiomes.Palette(Biome));
 
         BaseOne = CellTop(Layout.baseOne);
@@ -311,10 +394,14 @@ public class VoxelArena : MonoBehaviour
 
         double fillMs = generateTimer.Elapsed.TotalMilliseconds - layoutMs;
 
+        GenerationStage = "Меши чанков";
+        GenerationProgress = MeshesFrom;
         for (int c = 0; c < chunks.Length; c++)
             MarkChunkDirty(c);
 
-        RebuildDirtyChunks();
+        var rebuild = RebuildSteps(spread);
+        while (rebuild.MoveNext())
+            yield return null;
         LastGenerateMs = generateTimer.Elapsed.TotalMilliseconds;
 
         Debug.Log($"[Arena] Сид {generation.seed}, биом {ArenaBiomes.DisplayName(Biome)}: " +
@@ -323,8 +410,11 @@ public class VoxelArena : MonoBehaviour
                   $"деревьев {Layout.trees.Length}, камней {Layout.rocks.Length}, " +
                   $"раскладка {layoutMs:0} мс, воксели {fillMs:0} мс, меши {LastMeshMs:0} мс, " +
                   $"меши в Unity и коллайдеры {LastApplyMs:0} мс, склейка узлов {LastCombineMs:0} мс, " +
-                  $"всего {LastGenerateMs:0} мс");
+                  $"всего {LastGenerateMs:0} мс" + (spread ? " (по кадрам, с ожиданием кадров)" : ""));
 
+        IsGenerating = false;
+        GenerationProgress = 1f;
+        GenerationStage = null;
         Generated?.Invoke();
     }
 
@@ -392,12 +482,15 @@ public class VoxelArena : MonoBehaviour
     }
 
     /// <summary>
-    /// Выбивает воксели шаром. Возвращает число выбитых. maxDepth — на сколько вокселей ниже исходной
+    /// Выбивает воксели шаром (во время генерации — ничего). Возвращает число выбитых. maxDepth — на сколько вокселей ниже исходной
     /// поверхности столбца можно копать (воронки в бою — на 1: агент перешагивает уступ в один воксель,
     /// глубже — поле воронок становится непроходимым и отрезает базу)
     /// </summary>
     public int Explode(Vector3 worldCenter, float worldRadius, int maxDepth = int.MaxValue)
     {
+        // Пока идёт генерация, воксели пишут её джобы: выстрел в старую карту ничего не выбивает
+        if (IsGenerating)
+            return 0;
         float3 center = WorldToVoxel(worldCenter);
         float radius = worldRadius / voxelSize;
 
@@ -454,7 +547,8 @@ public class VoxelArena : MonoBehaviour
     /// <summary>Выбить перечисленные воксели (например, обрушить участок стены)</summary>
     public void ClearVoxels(IReadOnlyList<int3> cells)
     {
-        if (cells.Count == 0)
+        // Пока идёт генерация, воксели пишут её джобы
+        if (cells.Count == 0 || IsGenerating)
             return;
         int3 min = dims, max = int3.zero;
         removedVoxels.Clear();
@@ -715,14 +809,49 @@ public class VoxelArena : MonoBehaviour
 
     void RebuildDirtyChunks()
     {
+        var steps = RebuildSteps(false);
+        while (steps.MoveNext()) { }
+    }
+
+    // Перестройка чанков из dirtyChunks. spread — ждать джобы, отпуская кадры, и отпускать кадр после каждой
+    // пачки (генерация под экраном загрузки); иначе всё в этом же вызове. Замеры при spread — с ожиданием кадров
+    IEnumerator RebuildSteps(bool spread)
+    {
         int count = dirtyChunks.Count;
         // Много чанков (генерация) — во всех рабочих потоках; несколько (воронка, скол стены) — прямо
         // в главном: рабочие потоки бывают надолго заняты NavMesh, и ожидание их стоило бы десятки мс
         bool inWorkers = count > MainThreadChunkLimit;
 
-        // 0. Какие чанки вообще имеют видимые грани: пустым не нужны ни буферы, ни джобы мешей
+        // 0. Какие чанки вообще имеют видимые грани: пустым не нужны ни буферы, ни джобы мешей.
+        // Persistent: при spread массивы живут дольше четырёх кадров, которые живёт TempJob
         timer.Restart();
-        var faces = FindChunkFaces(count, inWorkers);
+        rebuildOrigins = new NativeArray<int3>(count, Allocator.Persistent);
+        for (int k = 0; k < count; k++)
+            rebuildOrigins[k] = ChunkCoord(dirtyChunks[k]) * ChunkSize;
+        rebuildFaces = new NativeArray<byte>(count, Allocator.Persistent);
+        var faces = rebuildFaces;
+        var facesJob = new ChunkFacesJob
+        {
+            voxels = voxels,
+            dims = dims,
+            chunkSize = ChunkSize,
+            chunkOrigins = rebuildOrigins,
+            faces = faces,
+        };
+        if (inWorkers)
+        {
+            generationJobs = facesJob.Schedule(count, 16);
+            JobHandle.ScheduleBatchedJobs();
+            if (spread)
+                while (!generationJobs.IsCompleted)
+                    yield return null;
+            generationJobs.Complete();
+        }
+        else
+        {
+            facesJob.Run(count);
+        }
+        rebuildOrigins.Dispose();
         double meshMs = timer.Elapsed.TotalMilliseconds, applyMs = 0;
 
         // Чанки строятся пачками: данные мешей сразу всех 15 000 чанков арены при генерации заняли бы
@@ -735,6 +864,9 @@ public class VoxelArena : MonoBehaviour
         {
             // 1. Меши: суша, вода и форма суши — отдельные задачи одной джобы
             timer.Restart();
+            if (spread)
+                while (!batch.handle.IsCompleted)
+                    yield return null;
             batch.handle.Complete();
             meshMs += timer.Elapsed.TotalMilliseconds;
 
@@ -748,21 +880,35 @@ public class VoxelArena : MonoBehaviour
             timer.Restart();
             ApplyBatch(batch, inWorkers);
             applyMs += timer.Elapsed.TotalMilliseconds;
+            if (IsGenerating)
+                GenerationProgress = math.lerp(MeshesFrom, CombineFrom, (float)nextStart / count);
 
             if (!more)
                 break;
             if (!overlap)
                 ScheduleBatch(next, nextStart, faces, inWorkers);
             batch = next;
+            // Кадр с прогрессом, пока рабочие потоки строят следующую пачку
+            if (spread)
+                yield return null;
         }
-        faces.Dispose();
+        rebuildFaces.Dispose();
         LastMeshMs = meshMs;
         LastApplyMs = applyMs;
 
         // 3. Узлы склеиваются из готовых мешей чанков
+        if (IsGenerating)
+            GenerationStage = "Склейка узлов";
         timer.Restart();
-        foreach (var node in dirtyNodes)
-            CombineNode(node);
+        for (int n = 0; n < dirtyNodes.Count; n++)
+        {
+            CombineNode(dirtyNodes[n]);
+            if (spread && n % CombineNodesPerFrame == CombineNodesPerFrame - 1)
+            {
+                GenerationProgress = math.lerp(CombineFrom, 1f, (float)n / dirtyNodes.Count);
+                yield return null;
+            }
+        }
         dirtyNodes.Clear();
         LastCombineMs = timer.Elapsed.TotalMilliseconds;
         LastRebuiltChunks = count;
@@ -782,38 +928,14 @@ public class VoxelArena : MonoBehaviour
         dirtyChunks.Clear();
     }
 
-    // Видимые грани каждого грязного чанка (ChunkFacesJob.LandFaces | WaterFaces), по индексу в dirtyChunks
-    NativeArray<byte> FindChunkFaces(int count, bool inWorkers)
-    {
-        var origins = new NativeArray<int3>(count, Allocator.TempJob);
-        for (int k = 0; k < count; k++)
-            origins[k] = ChunkCoord(dirtyChunks[k]) * ChunkSize;
-
-        var faces = new NativeArray<byte>(count, Allocator.TempJob);
-        var job = new ChunkFacesJob
-        {
-            voxels = voxels,
-            dims = dims,
-            chunkSize = ChunkSize,
-            chunkOrigins = origins,
-            faces = faces,
-        };
-        if (inWorkers)
-            job.Schedule(count, 16).Complete();
-        else
-            job.Run(count);
-
-        origins.Dispose();
-        return faces;
-    }
-
     // Запускает GreedyMeshJob пачки dirtyChunks[start ..]. Чанку без граней суши не нужны меши суши
     // и формы, без граней воды — меш воды: задач для них нет
     void ScheduleBatch(MeshBatch batch, int start, NativeArray<byte> faces, bool inWorkers)
     {
         batch.start = start;
         batch.count = Math.Min(ChunkBatch, faces.Length - start);
-        batch.tasks = new NativeList<ChunkMeshTask>(batch.count * 3, Allocator.TempJob);
+        // Persistent: при генерации по кадрам задачи пачки живут через кадр
+        batch.tasks = new NativeList<ChunkMeshTask>(batch.count * 3, Allocator.Persistent);
         batch.meshes.Clear();
 
         for (int k = 0; k < batch.count; k++)
@@ -834,6 +956,7 @@ public class VoxelArena : MonoBehaviour
 
         int taskCount = batch.tasks.Length;
         batch.data = Mesh.AllocateWritableMeshData(taskCount);
+        batch.scheduled = true;
         var job = new GreedyMeshJob
         {
             voxels = voxels,
@@ -917,6 +1040,7 @@ public class VoxelArena : MonoBehaviour
         Mesh.ApplyAndDisposeWritableMeshData(batch.data, batch.meshes,
             MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
         batch.tasks.Dispose();
+        batch.scheduled = false;
         var bounds = new Bounds(Vector3.one * (ChunkSize * 0.5f), Vector3.one * ChunkSize);
         foreach (var mesh in batch.meshes)
             mesh.bounds = bounds;
@@ -959,6 +1083,8 @@ public class VoxelArena : MonoBehaviour
         return batch.data[task].GetSubMesh(0).indexCount;
     }
 
+    // Сколько узлов склеивать за кадр при генерации по кадрам
+    const int CombineNodesPerFrame = 128;
     // Сколько чанков за раз строится в главном потоке, а не в рабочих
     const int MainThreadChunkLimit = 12;
     // Чанков в одной пачке перестройки
