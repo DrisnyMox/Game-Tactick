@@ -1,4 +1,6 @@
+using Unity.Burst;
 using Unity.Collections;
+using Unity.Jobs;
 using Unity.Mathematics;
 using static VoxelBlocks;
 
@@ -13,49 +15,85 @@ public static class ArenaDecorator
     /// </summary>
     public static void Decorate(NativeArray<byte> voxels, int3 dims, int cellVoxels, ArenaLayout layout, ArenaBiome biome, int seed, int wallHeight)
     {
-        var writer = new Writer(voxels, dims, cellVoxels);
-        var rnd = new System.Random(seed * 31 + 5);
-        int sx = layout.sizeX;
-
-        foreach (var cell in layout.trees)
+        new DecorateJob
         {
-            int ground = layout.height[cell.y * sx + cell.x];
-            var root = new int3(cell.x, ground, cell.y);
+            voxels = voxels,
+            dims = dims,
+            cellVoxels = cellVoxels,
+            sizeX = layout.sizeX,
+            height = layout.height,
+            trees = layout.trees.AsArray(),
+            rocks = layout.rocks.AsArray(),
+            walls = layout.walls.AsArray(),
+            resources = layout.resources.AsArray(),
+            biome = biome,
+            seed = seed,
+            wallHeight = wallHeight,
+        }.Run();
+    }
 
-            switch (biome)
+    // Постройки идут по порядку: их форма зависит от общей последовательности случайных чисел.
+    // Strict: деревья и камни по сиду одинаковы в редакторе (Burst) и в WebGL (без Burst)
+    [BurstCompile(FloatMode = FloatMode.Strict)]
+    struct DecorateJob : IJob
+    {
+        public NativeArray<byte> voxels;
+        public int3 dims;
+        public int cellVoxels;
+        public int sizeX;
+        [ReadOnly] public NativeArray<int> height;
+        [ReadOnly] public NativeArray<int2> trees;
+        [ReadOnly] public NativeArray<int2> rocks;
+        [ReadOnly] public NativeArray<WallCell> walls;
+        [ReadOnly] public NativeArray<ResourcePoint> resources;
+        public ArenaBiome biome;
+        public int seed;
+        public int wallHeight;
+
+        public void Execute()
+        {
+            var writer = new Writer(voxels, dims, cellVoxels);
+            var rnd = new DotNetRandom(seed * 31 + 5);
+
+            for (int k = 0; k < trees.Length; k++)
             {
-                case ArenaBiome.Winter:
-                    Pine(writer, root, rnd);
-                    break;
-                case ArenaBiome.Desert:
-                    Cactus(writer, root, rnd);
-                    break;
-                default:
-                    RoundTree(writer, root, rnd, biome == ArenaBiome.Autumn);
-                    break;
+                var cell = trees[k];
+                var root = new int3(cell.x, height[cell.y * sizeX + cell.x], cell.y);
+
+                switch (biome)
+                {
+                    case ArenaBiome.Winter:
+                        Pine(ref writer, root, ref rnd);
+                        break;
+                    case ArenaBiome.Desert:
+                        Cactus(ref writer, root, ref rnd);
+                        break;
+                    default:
+                        RoundTree(ref writer, root, ref rnd, biome == ArenaBiome.Autumn);
+                        break;
+                }
             }
-        }
 
-        foreach (var cell in layout.rocks)
-        {
-            int ground = layout.height[cell.y * sx + cell.x];
-            Rock(writer, new int3(cell.x, ground, cell.y), rnd);
-        }
+            for (int k = 0; k < rocks.Length; k++)
+            {
+                var cell = rocks[k];
+                Rock(ref writer, new int3(cell.x, height[cell.y * sizeX + cell.x], cell.y), ref rnd);
+            }
 
-        foreach (var wall in layout.walls)
-        {
-            int ground = layout.height[wall.cell.y * sx + wall.cell.x];
-            int top = wallHeight + (wall.outer && Merlon(wall.cell) ? 1 : 0);
-            for (int y = 0; y < top; y++)
-                writer.Set(new int3(wall.cell.x, ground + y, wall.cell.y), Wall);
-        }
+            for (int k = 0; k < walls.Length; k++)
+            {
+                var wall = walls[k];
+                int ground = height[wall.cell.y * sizeX + wall.cell.x];
+                int top = wallHeight + (wall.outer && Merlon(wall.cell) ? 1 : 0);
+                for (int y = 0; y < top; y++)
+                    writer.Set(new int3(wall.cell.x, ground + y, wall.cell.y), Wall);
+            }
 
-        foreach (var resource in layout.resources)
-        {
-            int ground = layout.height[resource.cell.y * sx + resource.cell.x];
-            var root = new int3(resource.cell.x, ground, resource.cell.y);
-
-            CapturePoint(writer, root);
+            for (int k = 0; k < resources.Length; k++)
+            {
+                var cell = resources[k].cell;
+                CapturePoint(ref writer, new int3(cell.x, height[cell.y * sizeX + cell.x], cell.y));
+            }
         }
     }
 
@@ -63,7 +101,7 @@ public static class ArenaDecorator
     static bool Merlon(int2 cell) => ((cell.x + cell.y) / 2) % 2 == 0;
 
     // Точка захвата: светлое кольцо в земле радиусом 3 и рудный бугор в центре
-    static void CapturePoint(Writer w, int3 root)
+    static void CapturePoint(ref Writer w, int3 root)
     {
         for (int dz = -3; dz <= 3; dz++)
         {
@@ -75,11 +113,11 @@ public static class ArenaDecorator
             }
         }
 
-        OreMound(w, root, IronOre);
+        OreMound(ref w, root, IronOre);
     }
 
     // Лиственное дерево: ствол и круглая крона; осенью крона пёстрая
-    static void RoundTree(Writer w, int3 root, System.Random rnd, bool autumn)
+    static void RoundTree(ref Writer w, int3 root, ref DotNetRandom rnd, bool autumn)
     {
         int trunk = 3 + rnd.Next(2);
         for (int y = 0; y < trunk; y++)
@@ -112,7 +150,7 @@ public static class ArenaDecorator
     }
 
     // Ель: ствол и конус из слоёв хвои, сверху снег
-    static void Pine(Writer w, int3 root, System.Random rnd)
+    static void Pine(ref Writer w, int3 root, ref DotNetRandom rnd)
     {
         int trunk = 2;
         int layers = 5 + rnd.Next(2);
@@ -151,7 +189,7 @@ public static class ArenaDecorator
     }
 
     // Кактус: столб и одна-две «руки»
-    static void Cactus(Writer w, int3 root, System.Random rnd)
+    static void Cactus(ref Writer w, int3 root, ref DotNetRandom rnd)
     {
         int height = 3 + rnd.Next(3);
         for (int y = 0; y < height; y++)
@@ -160,7 +198,7 @@ public static class ArenaDecorator
         int arms = 1 + rnd.Next(2);
         for (int a = 0; a < arms; a++)
         {
-            var side = (rnd.Next(4)) switch
+            var side = rnd.Next(4) switch
             {
                 0 => new int3(1, 0, 0),
                 1 => new int3(-1, 0, 0),
@@ -177,11 +215,14 @@ public static class ArenaDecorator
     }
 
     // Валун: неровный сплюснутый ком камня
-    static void Rock(Writer w, int3 root, System.Random rnd)
+    static void Rock(ref Writer w, int3 root, ref DotNetRandom rnd)
     {
         float radius = 1.4f + (float)rnd.NextDouble() * 1.2f;
         int r = (int)math.ceil(radius);
-        var stretch = new float3(1f + (float)rnd.NextDouble() * 0.4f, 1.3f, 1f + (float)rnd.NextDouble() * 0.4f);
+        // Порядок вызовов как в прежнем коде: x растяжения, затем z
+        float stretchX = 1f + (float)rnd.NextDouble() * 0.4f;
+        float stretchZ = 1f + (float)rnd.NextDouble() * 0.4f;
+        var stretch = new float3(stretchX, 1.3f, stretchZ);
 
         for (int dy = -1; dy <= r; dy++)
         {
@@ -199,7 +240,7 @@ public static class ArenaDecorator
     }
 
     // Рудная площадка: верхний слой вокруг — руда, в центре бугор из руды
-    static void OreMound(Writer w, int3 root, byte ore)
+    static void OreMound(ref Writer w, int3 root, byte ore)
     {
         for (int dz = -2; dz <= 2; dz++)
         {

@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
+using Unity.Jobs.LowLevel.Unsafe;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
 using Debug = UnityEngine.Debug;
 
 /// <summary>
@@ -128,34 +131,34 @@ public class VoxelArena : MonoBehaviour
         public bool dirty;
     }
 
-    class MeshBuffers
+    /// <summary>
+    /// Меши одной пачки чанков: задачи GreedyMeshJob и Mesh.MeshDataArray, в которую джоба их пишет.
+    /// landTask / waterTask / shapeTask — номер задачи меша чанка в пачке, -1 — у чанка нет граней этого меша
+    /// </summary>
+    sealed class MeshBatch
     {
-        public NativeList<float3> positions;
-        public NativeList<float3> normals;
-        public NativeList<Color32> colors;
-        public NativeList<uint> indices;
-
-        public MeshBuffers()
-        {
-            positions = new NativeList<float3>(1024, Allocator.TempJob);
-            normals = new NativeList<float3>(1024, Allocator.TempJob);
-            colors = new NativeList<Color32>(1024, Allocator.TempJob);
-            indices = new NativeList<uint>(1536, Allocator.TempJob);
-        }
-
-        public void Dispose()
-        {
-            positions.Dispose();
-            normals.Dispose();
-            colors.Dispose();
-            indices.Dispose();
-        }
+        public readonly int[] landTask = new int[ChunkBatch];
+        public readonly int[] waterTask = new int[ChunkBatch];
+        public readonly int[] shapeTask = new int[ChunkBatch];
+        // Меши задач по порядку: в них Mesh.ApplyAndDisposeWritableMeshData кладёт данные
+        public readonly List<Mesh> meshes = new(ChunkBatch * 3);
+        public NativeList<ChunkMeshTask> tasks;
+        public Mesh.MeshDataArray data;
+        public JobHandle handle;
+        public int start, count;
     }
+
+    // Две пачки: пока одна загружается в Unity, рабочие потоки строят меши другой
+    readonly MeshBatch[] meshBatches = { new(), new() };
+    // Раскладка вершин: суша и вода — позиция, нормаль, цвет (r — индекс палитры, g — затенение);
+    // форма — только позиция. Каждый атрибут в своём потоке: джоба копирует их отдельно
+    NativeArray<VertexAttributeDescriptor> colorLayout;
+    NativeArray<VertexAttributeDescriptor> shapeLayout;
 
     int3 dims;
     int3 chunkCounts;
     // Высота поверхности каждого столбца вокселей после генерации (индекс z * dims.x + x)
-    int[] columnHeight;
+    NativeArray<int> columnHeight;
 
     NativeArray<byte> voxels;
     NativeArray<byte> faceColors;
@@ -178,7 +181,18 @@ public class VoxelArena : MonoBehaviour
         chunkCounts = dims / ChunkSize;
 
         voxels = new NativeArray<byte>(dims.x * dims.y * dims.z, Allocator.Persistent);
+        columnHeight = new NativeArray<int>(dims.x * dims.z, Allocator.Persistent);
         faceColors = VoxelBlocks.CreateFaceTable(Allocator.Persistent);
+        colorLayout = new NativeArray<VertexAttributeDescriptor>(new[]
+        {
+            new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, 0),
+            new VertexAttributeDescriptor(VertexAttribute.Normal, VertexAttributeFormat.Float32, 3, 1),
+            new VertexAttributeDescriptor(VertexAttribute.Color, VertexAttributeFormat.UNorm8, 4, 2),
+        }, Allocator.Persistent);
+        shapeLayout = new NativeArray<VertexAttributeDescriptor>(new[]
+        {
+            new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, 0),
+        }, Allocator.Persistent);
 
         paletteTexture = VoxelBlocks.CreatePaletteTexture();
         Shader.SetGlobalTexture(PaletteTexId, paletteTexture);
@@ -211,7 +225,12 @@ public class VoxelArena : MonoBehaviour
     void OnDestroy()
     {
         voxels.Dispose();
+        columnHeight.Dispose();
         faceColors.Dispose();
+        colorLayout.Dispose();
+        shapeLayout.Dispose();
+        // null — объект уничтожен до Start, раскладки ещё не было
+        Layout?.Dispose();
 
         foreach (var chunk in chunks)
         {
@@ -236,28 +255,41 @@ public class VoxelArena : MonoBehaviour
 
         Biome = ArenaBiomes.Resolve(generation.biome, generation.seed);
         int k = cellVoxels;
+        // Раскладка прошлой карты (null — карта первая)
+        Layout?.Dispose();
         Layout = ArenaLayoutGenerator.Generate(generation, Biome, dims.x / k, dims.y / k, dims.z / k);
         double layoutMs = generateTimer.Elapsed.TotalMilliseconds;
 
-        var height = new NativeArray<int>(dims.x * dims.z, Allocator.TempJob);
-        var waterTop = new NativeArray<int>(dims.x * dims.z, Allocator.TempJob);
-        var flags = new NativeArray<byte>(dims.x * dims.z, Allocator.TempJob);
-        ExpandLayout(height, waterTop, flags);
-        columnHeight = height.ToArray();
+        int columns = dims.x * dims.z;
+        var waterTop = new NativeArray<int>(columns, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        var flags = new NativeArray<byte>(columns, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+        var expand = new ExpandLayoutJob
+        {
+            dims = dims,
+            cellVoxels = k,
+            layoutSizeX = Layout.sizeX,
+            layoutSizeZ = Layout.sizeZ,
+            cellHeight = Layout.height,
+            cellWaterTop = Layout.waterTop,
+            cellFlags = Layout.flags,
+            height = columnHeight,
+            waterTop = waterTop,
+            flags = flags,
+        }.Schedule(columns, dims.x);
 
         new ArenaGenerateJob
         {
             dims = dims,
             snowLine = ArenaBiomes.SnowLine(Biome, generation.highHeight) * k,
-            height = height,
+            height = columnHeight,
             waterTop = waterTop,
             flags = flags,
             voxels = voxels,
         }
-        .Schedule(dims.x * dims.z, dims.x)
+        .Schedule(columns, dims.x, expand)
         .Complete();
 
-        height.Dispose();
         waterTop.Dispose();
         flags.Dispose();
 
@@ -280,7 +312,7 @@ public class VoxelArena : MonoBehaviour
         Debug.Log($"[Arena] Сид {generation.seed}, биом {ArenaBiomes.DisplayName(Biome)}: " +
                   $"участков {Layout.regionCount}, рамп {Layout.rampCount}, выровнено {Layout.flattenedRegions}, " +
                   $"по сетке: базы связаны {Layout.basesConnected}, точки захвата достижимы {Layout.capturePointsReachable}, " +
-                  $"деревьев {Layout.trees.Count}, камней {Layout.rocks.Count}, " +
+                  $"деревьев {Layout.trees.Length}, камней {Layout.rocks.Length}, " +
                   $"раскладка {layoutMs:0} мс, воксели {fillMs:0} мс, меши {LastMeshMs:0} мс, " +
                   $"меши в Unity и коллайдеры {LastApplyMs:0} мс, склейка узлов {LastCombineMs:0} мс, " +
                   $"всего {LastGenerateMs:0} мс");
@@ -294,46 +326,53 @@ public class VoxelArena : MonoBehaviour
     /// (рампы, склоны гор) сглаживается до шага в один воксель, иначе рампа стала бы лестницей
     /// со ступенями в cellVoxels вокселей. Обрывы (перепад больше одного блока) остаются обрывами.
     /// </summary>
-    void ExpandLayout(NativeArray<int> height, NativeArray<int> waterTop, NativeArray<byte> flags)
+    [BurstCompile(FloatMode = FloatMode.Strict)]
+    struct ExpandLayoutJob : IJobParallelFor
     {
-        int k = cellVoxels;
-        int lx = Layout.sizeX, lz = Layout.sizeZ;
-        int[] cellHeight = Layout.height;
+        public int3 dims;
+        public int cellVoxels;
+        public int layoutSizeX, layoutSizeZ;
+        [ReadOnly] public NativeArray<int> cellHeight;
+        [ReadOnly] public NativeArray<int> cellWaterTop;
+        [ReadOnly] public NativeArray<byte> cellFlags;
+        [WriteOnly] public NativeArray<int> height;
+        [WriteOnly] public NativeArray<int> waterTop;
+        [WriteOnly] public NativeArray<byte> flags;
 
-        for (int z = 0; z < dims.z; z++)
+        public void Execute(int column)
         {
+            int k = cellVoxels;
+            int lx = layoutSizeX, lz = layoutSizeZ;
+            int x = column % dims.x, z = column / dims.x;
+
             int cz = z / k;
             // Смещение середины столбца от середины клетки, в долях клетки: от -0.5 до 0.5
             float oz = ((z % k) + 0.5f) / k - 0.5f;
             int nz = oz < 0 ? cz - 1 : cz + 1;
 
-            for (int x = 0; x < dims.x; x++)
+            int cx = x / k;
+            float ox = ((x % k) + 0.5f) / k - 0.5f;
+            int nx = ox < 0 ? cx - 1 : cx + 1;
+
+            int cell = cz * lx + cx;
+            int h = cellHeight[cell];
+            float smooth = h;
+            if (nx >= 0 && nx < lx)
             {
-                int cx = x / k;
-                float ox = ((x % k) + 0.5f) / k - 0.5f;
-                int nx = ox < 0 ? cx - 1 : cx + 1;
-
-                int cell = cz * lx + cx;
-                int h = cellHeight[cell];
-                float smooth = h;
-                if (nx >= 0 && nx < lx)
-                {
-                    int d = cellHeight[cz * lx + nx] - h;
-                    if (math.abs(d) == 1)
-                        smooth += math.abs(ox) * d;
-                }
-                if (nz >= 0 && nz < lz)
-                {
-                    int d = cellHeight[nz * lx + cx] - h;
-                    if (math.abs(d) == 1)
-                        smooth += math.abs(oz) * d;
-                }
-
-                int column = z * dims.x + x;
-                height[column] = (int)math.floor(smooth * k + 0.5f);
-                waterTop[column] = Layout.waterTop[cell] * k;
-                flags[column] = Layout.flags[cell];
+                int d = cellHeight[cz * lx + nx] - h;
+                if (math.abs(d) == 1)
+                    smooth += math.abs(ox) * d;
             }
+            if (nz >= 0 && nz < lz)
+            {
+                int d = cellHeight[nz * lx + cx] - h;
+                if (math.abs(d) == 1)
+                    smooth += math.abs(oz) * d;
+            }
+
+            height[column] = (int)math.floor(smooth * k + 0.5f);
+            waterTop[column] = cellWaterTop[cell] * k;
+            flags[column] = cellFlags[cell];
         }
     }
 
@@ -559,6 +598,7 @@ public class VoxelArena : MonoBehaviour
             root.transform.localScale = Vector3.one * voxelSize;
 
             var collider = root.AddComponent<MeshCollider>();
+            collider.cookingOptions = ColliderCooking;
             collider.sharedMesh = null;
             collider.enabled = false;
 
@@ -666,62 +706,48 @@ public class VoxelArena : MonoBehaviour
     void RebuildDirtyChunks()
     {
         int count = dirtyChunks.Count;
-        var landBuffers = new MeshBuffers[count];
-        var waterBuffers = new MeshBuffers[count];
-        var shapeBuffers = new MeshBuffers[count];
-        var handles = new NativeArray<JobHandle>(count * 3, Allocator.Temp);
-
-        // 1. Меши: суша, вода и форма суши отдельными джобами. Много чанков (генерация) — во всех
-        // рабочих потоках; несколько (воронка, скол стены) — прямо в главном: рабочие потоки бывают
-        // надолго заняты NavMesh, и ожидание их стоило бы десятки мс
-        timer.Restart();
+        // Много чанков (генерация) — во всех рабочих потоках; несколько (воронка, скол стены) — прямо
+        // в главном: рабочие потоки бывают надолго заняты NavMesh, и ожидание их стоило бы десятки мс
         bool inWorkers = count > MainThreadChunkLimit;
-        for (int k = 0; k < count; k++)
-        {
-            int3 origin = ChunkCoord(dirtyChunks[k]) * ChunkSize;
-            landBuffers[k] = new MeshBuffers();
-            waterBuffers[k] = new MeshBuffers();
-            shapeBuffers[k] = new MeshBuffers();
 
-            handles[k * 3] = BuildMesh(origin, false, false, landBuffers[k], inWorkers);
-            handles[k * 3 + 1] = BuildMesh(origin, true, false, waterBuffers[k], inWorkers);
-            handles[k * 3 + 2] = BuildMesh(origin, false, true, shapeBuffers[k], inWorkers);
-        }
-        JobHandle.CompleteAll(handles);
-        handles.Dispose();
-        LastMeshMs = timer.Elapsed.TotalMilliseconds;
-
-        // 2. Загрузка в Mesh и MeshCollider (коллайдер готовит данные при назначении меша)
+        // 0. Какие чанки вообще имеют видимые грани: пустым не нужны ни буферы, ни джобы мешей
         timer.Restart();
-        for (int k = 0; k < count; k++)
+        var faces = FindChunkFaces(count, inWorkers);
+        double meshMs = timer.Elapsed.TotalMilliseconds, applyMs = 0;
+
+        // Чанки строятся пачками: данные мешей сразу всех 15 000 чанков арены при генерации заняли бы
+        // сотни МБ, а куча WebGL не больше 2 ГБ. Пока главный поток загружает пачку в Unity, рабочие
+        // потоки уже строят следующую. Без рабочих потоков (WebGL) вторая пачка только заняла бы память
+        bool overlap = inWorkers && JobsUtility.JobWorkerCount > 0;
+        var batch = meshBatches[0];
+        ScheduleBatch(batch, 0, faces, inWorkers);
+        while (true)
         {
-            var chunk = chunks[dirtyChunks[k]];
+            // 1. Меши: суша, вода и форма суши — отдельные задачи одной джобы
+            timer.Restart();
+            batch.handle.Complete();
+            meshMs += timer.Elapsed.TotalMilliseconds;
 
-            // Переназначение заставляет коллайдер взять новые данные
-            chunk.collider.sharedMesh = null;
+            int nextStart = batch.start + batch.count;
+            bool more = nextStart < count;
+            var next = overlap ? meshBatches[batch == meshBatches[0] ? 1 : 0] : batch;
+            if (more && overlap)
+                ScheduleBatch(next, nextStart, faces, inWorkers);
 
-            bool hasLand = ApplyMesh(chunk.land, landBuffers[k]);
-            chunk.hasLand = hasLand;
-            ApplyMesh(chunk.shape, shapeBuffers[k]);
-            chunk.collider.enabled = hasLand;
-            if (hasLand)
-                chunk.collider.sharedMesh = chunk.shape;
+            // 2. Загрузка в Mesh и MeshCollider
+            timer.Restart();
+            ApplyBatch(batch, inWorkers);
+            applyMs += timer.Elapsed.TotalMilliseconds;
 
-            chunk.hasWater = ApplyMesh(chunk.water, waterBuffers[k]);
-            var node = NodeOfChunk(dirtyChunks[k]);
-            if (!node.dirty)
-            {
-                node.dirty = true;
-                dirtyNodes.Add(node);
-            }
-            chunk.triangles = (landBuffers[k].indices.Length + waterBuffers[k].indices.Length) / 3;
-            chunk.shapeTriangles = shapeBuffers[k].indices.Length / 3;
-
-            landBuffers[k].Dispose();
-            waterBuffers[k].Dispose();
-            shapeBuffers[k].Dispose();
+            if (!more)
+                break;
+            if (!overlap)
+                ScheduleBatch(next, nextStart, faces, inWorkers);
+            batch = next;
         }
-        LastApplyMs = timer.Elapsed.TotalMilliseconds;
+        faces.Dispose();
+        LastMeshMs = meshMs;
+        LastApplyMs = applyMs;
 
         // 3. Узлы склеиваются из готовых мешей чанков
         timer.Restart();
@@ -729,15 +755,6 @@ public class VoxelArena : MonoBehaviour
             CombineNode(node);
         dirtyNodes.Clear();
         LastCombineMs = timer.Elapsed.TotalMilliseconds;
-
-        int total = 0, shapeTotal = 0;
-        foreach (var chunk in chunks)
-        {
-            total += chunk.triangles;
-            shapeTotal += chunk.shapeTriangles;
-        }
-        TotalTriangles = total;
-        TotalShapeTriangles = shapeTotal;
         LastRebuiltChunks = count;
 
         foreach (int index in dirtyChunks)
@@ -755,52 +772,174 @@ public class VoxelArena : MonoBehaviour
         dirtyChunks.Clear();
     }
 
-    // Сколько чанков за раз строится в главном потоке, а не в рабочих
-    const int MainThreadChunkLimit = 12;
-
-    JobHandle BuildMesh(int3 origin, bool water, bool plain, MeshBuffers buffers, bool inWorkers)
+    // Видимые грани каждого грязного чанка (ChunkFacesJob.LandFaces | WaterFaces), по индексу в dirtyChunks
+    NativeArray<byte> FindChunkFaces(int count, bool inWorkers)
     {
+        var origins = new NativeArray<int3>(count, Allocator.TempJob);
+        for (int k = 0; k < count; k++)
+            origins[k] = ChunkCoord(dirtyChunks[k]) * ChunkSize;
+
+        var faces = new NativeArray<byte>(count, Allocator.TempJob);
+        var job = new ChunkFacesJob
+        {
+            voxels = voxels,
+            dims = dims,
+            chunkSize = ChunkSize,
+            chunkOrigins = origins,
+            faces = faces,
+        };
+        if (inWorkers)
+            job.Schedule(count, 16).Complete();
+        else
+            job.Run(count);
+
+        origins.Dispose();
+        return faces;
+    }
+
+    // Запускает GreedyMeshJob пачки dirtyChunks[start ..]. Чанку без граней суши не нужны меши суши
+    // и формы, без граней воды — меш воды: задач для них нет
+    void ScheduleBatch(MeshBatch batch, int start, NativeArray<byte> faces, bool inWorkers)
+    {
+        batch.start = start;
+        batch.count = Math.Min(ChunkBatch, faces.Length - start);
+        batch.tasks = new NativeList<ChunkMeshTask>(batch.count * 3, Allocator.TempJob);
+        batch.meshes.Clear();
+
+        for (int k = 0; k < batch.count; k++)
+        {
+            var chunk = chunks[dirtyChunks[start + k]];
+            int3 origin = ChunkCoord(dirtyChunks[start + k]) * ChunkSize;
+            byte chunkFaces = faces[start + k];
+
+            batch.landTask[k] = batch.shapeTask[k] = batch.waterTask[k] = -1;
+            if ((chunkFaces & ChunkFacesJob.LandFaces) != 0)
+            {
+                batch.landTask[k] = AddTask(batch, origin, ChunkMeshKind.Land, chunk.land);
+                batch.shapeTask[k] = AddTask(batch, origin, ChunkMeshKind.Shape, chunk.shape);
+            }
+            if ((chunkFaces & ChunkFacesJob.WaterFaces) != 0)
+                batch.waterTask[k] = AddTask(batch, origin, ChunkMeshKind.Water, chunk.water);
+        }
+
+        int taskCount = batch.tasks.Length;
+        batch.data = Mesh.AllocateWritableMeshData(taskCount);
         var job = new GreedyMeshJob
         {
             voxels = voxels,
             faceColors = faceColors,
             dims = dims,
-            chunkOrigin = origin,
             chunkSize = ChunkSize,
-            water = water,
-            plain = plain,
-            positions = buffers.positions,
-            normals = buffers.normals,
-            colors = buffers.colors,
-            indices = buffers.indices,
+            tasks = batch.tasks.AsArray(),
+            colorLayout = colorLayout,
+            shapeLayout = shapeLayout,
+            meshes = batch.data,
         };
 
         if (inWorkers)
-            return job.Schedule();
-        job.Run();
-        return default;
-    }
-
-    // Меш собирается обычными SetVertices/SetNormals/SetColors/SetIndices, как в Voxer
-    static bool ApplyMesh(Mesh mesh, MeshBuffers buffers)
-    {
-        mesh.Clear();
-
-        if (buffers.indices.Length == 0)
-            return false;
-
-        mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
-        mesh.SetVertices(buffers.positions.AsArray());
-        // У меша формы нормалей и цветов нет
-        if (buffers.normals.Length > 0)
         {
-            mesh.SetNormals(buffers.normals.AsArray());
-            mesh.SetColors(buffers.colors.AsArray());
+            batch.handle = job.Schedule(taskCount, 1);
+            // Schedule только ставит джобу в очередь — рабочие потоки берутся за неё после этого вызова
+            JobHandle.ScheduleBatchedJobs();
         }
-        mesh.SetIndices(buffers.indices.AsArray(), MeshTopology.Triangles, 0);
-
-        // Границы задаём явно: по ним Unity решает, виден ли чанк камере
-        mesh.bounds = new Bounds(Vector3.one * (ChunkSize * 0.5f), Vector3.one * ChunkSize);
-        return true;
+        else
+        {
+            job.Run(taskCount);
+            batch.handle = default;
+        }
     }
+
+    static int AddTask(MeshBatch batch, int3 origin, ChunkMeshKind kind, Mesh mesh)
+    {
+        batch.tasks.Add(new ChunkMeshTask { origin = origin, kind = kind });
+        batch.meshes.Add(mesh);
+        return batch.tasks.Length - 1;
+    }
+
+    // Загружает готовые меши пачки в Mesh (одним Mesh.ApplyAndDisposeWritableMeshData) и MeshCollider
+    void ApplyBatch(MeshBatch batch, bool inWorkers)
+    {
+        var bakeMeshes = new NativeArray<EntityId>(batch.count, Allocator.TempJob);
+        int bakeCount = 0;
+
+        for (int k = 0; k < batch.count; k++)
+        {
+            int index = dirtyChunks[batch.start + k];
+            var chunk = chunks[index];
+
+            // Переназначение заставляет коллайдер взять новые данные
+            chunk.collider.sharedMesh = null;
+
+            int landIndices = TaskIndexCount(batch, batch.landTask[k], chunk.land);
+            int shapeIndices = TaskIndexCount(batch, batch.shapeTask[k], chunk.shape);
+            int waterIndices = TaskIndexCount(batch, batch.waterTask[k], chunk.water);
+            chunk.hasLand = landIndices > 0;
+            chunk.hasWater = waterIndices > 0;
+            if (chunk.hasLand)
+                bakeMeshes[bakeCount++] = chunk.shape.GetEntityId();
+
+            var node = NodeOfChunk(index);
+            if (!node.dirty)
+            {
+                node.dirty = true;
+                dirtyNodes.Add(node);
+            }
+
+            int triangles = (landIndices + waterIndices) / 3;
+            int shapeTriangles = shapeIndices / 3;
+            TotalTriangles += triangles - chunk.triangles;
+            TotalShapeTriangles += shapeTriangles - chunk.shapeTriangles;
+            chunk.triangles = triangles;
+            chunk.shapeTriangles = shapeTriangles;
+        }
+
+        // Границы уже заданы в подмешах джобой; данные остаются читаемыми — их берут коллайдер и NavMesh
+        Mesh.ApplyAndDisposeWritableMeshData(batch.data, batch.meshes,
+            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+        batch.tasks.Dispose();
+        var bounds = new Bounds(Vector3.one * (ChunkSize * 0.5f), Vector3.one * ChunkSize);
+        foreach (var mesh in batch.meshes)
+            mesh.bounds = bounds;
+
+        // Данные PhysX для коллайдеров готовятся во всех рабочих потоках: назначенный меш коллайдер
+        // берёт уже готовым. Без этого он готовил бы их сам в главном потоке, чанк за чанком
+        if (inWorkers && bakeCount > 0)
+        {
+            new BakeColliderJob { meshes = bakeMeshes, options = ColliderCooking }
+                .Schedule(bakeCount, 4)
+                .Complete();
+        }
+        bakeMeshes.Dispose();
+
+        for (int k = 0; k < batch.count; k++)
+        {
+            var chunk = chunks[dirtyChunks[batch.start + k]];
+            chunk.collider.enabled = chunk.hasLand;
+            if (chunk.hasLand)
+                chunk.collider.sharedMesh = chunk.shape;
+        }
+    }
+
+    // Число индексов меша задачи; task < 0 — задачи нет (у чанка нет граней этого меша), меш очищается
+    static int TaskIndexCount(MeshBatch batch, int task, Mesh mesh)
+    {
+        if (task < 0)
+        {
+            mesh.Clear();
+            return 0;
+        }
+        return batch.data[task].GetSubMesh(0).indexCount;
+    }
+
+    // Сколько чанков за раз строится в главном потоке, а не в рабочих
+    const int MainThreadChunkLimit = 12;
+    // Чанков в одной пачке перестройки
+    const int ChunkBatch = 256;
+    // Настройки подготовки коллайдеров чанков. Physics.BakeMesh и MeshCollider должны использовать
+    // одни и те же, иначе коллайдер заново готовит данные при назначении меша
+    const MeshColliderCookingOptions ColliderCooking =
+        MeshColliderCookingOptions.CookForFasterSimulation |
+        MeshColliderCookingOptions.EnableMeshCleaning |
+        MeshColliderCookingOptions.WeldColocatedVertices |
+        MeshColliderCookingOptions.UseFastMidphase;
 }

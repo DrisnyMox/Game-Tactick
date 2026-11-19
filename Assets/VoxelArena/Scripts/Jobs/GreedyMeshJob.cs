@@ -1,21 +1,125 @@
 using Unity.Burst;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Rendering;
+
+/// <summary>Какой меш чанка строить</summary>
+public enum ChunkMeshKind : byte
+{
+    // Суша: всё, кроме воды, с цветом и затенением
+    Land,
+    // Вода
+    Water,
+    // Форма суши без цвета, затенения и нормалей: для MeshCollider и NavMesh
+    Shape,
+}
+
+/// <summary>Один меш одного чанка: начало чанка в вокселях и вид меша</summary>
+public struct ChunkMeshTask
+{
+    public int3 origin;
+    public ChunkMeshKind kind;
+}
 
 /// <summary>
-/// Строит меш одного чанка. Соседние грани склеиваются в один прямоугольник,
+/// Строит меши пачки чанков и пишет их прямо в Mesh.MeshDataArray: в главном потоке остаётся
+/// только Mesh.ApplyAndDisposeWritableMeshData. Задача index пишет в meshes[index].
+/// Чанки без видимых граней сюда не попадают: их отсеивает ChunkFacesJob.
+/// Вершины суши и воды — три потока: позиция (float3), нормаль (float3), цвет (4 байта:
+/// r — индекс палитры, g — затенение угла). У формы — только позиция.
+/// </summary>
+[BurstCompile]
+public struct GreedyMeshJob : IJobParallelFor
+{
+    [ReadOnly] public NativeArray<byte> voxels;
+    [ReadOnly] public NativeArray<byte> faceColors;
+    public int3 dims;
+    public int chunkSize;
+    [ReadOnly] public NativeArray<ChunkMeshTask> tasks;
+    // Раскладка вершин суши и воды (позиция, нормаль, цвет) и формы (позиция)
+    [ReadOnly] public NativeArray<VertexAttributeDescriptor> colorLayout;
+    [ReadOnly] public NativeArray<VertexAttributeDescriptor> shapeLayout;
+    public Mesh.MeshDataArray meshes;
+
+    public void Execute(int index)
+    {
+        var task = tasks[index];
+        bool plain = task.kind == ChunkMeshKind.Shape;
+
+        // Списки живут одну задачу и сразу освобождаются: временная память задач не копится
+        // за кадр, даже когда все джобы идут в главном потоке (WebGL)
+        var mesher = new GreedyMesher
+        {
+            voxels = voxels,
+            faceColors = faceColors,
+            dims = dims,
+            chunkSize = chunkSize,
+            chunkOrigin = task.origin,
+            water = task.kind == ChunkMeshKind.Water,
+            plain = plain,
+            mask = new UnsafeList<int>(chunkSize * chunkSize, Allocator.Persistent),
+            positions = new UnsafeList<float3>(1024, Allocator.Persistent),
+            normals = new UnsafeList<float3>(plain ? 0 : 1024, Allocator.Persistent),
+            colors = new UnsafeList<Color32>(plain ? 0 : 1024, Allocator.Persistent),
+            indices = new UnsafeList<uint>(1536, Allocator.Persistent),
+        };
+        mesher.mask.Resize(chunkSize * chunkSize);
+
+        mesher.Build();
+        Write(meshes[index], ref mesher, plain);
+        mesher.Dispose();
+    }
+
+    void Write(Mesh.MeshData data, ref GreedyMesher mesher, bool plain)
+    {
+        int vertexCount = mesher.positions.Length;
+        int indexCount = mesher.indices.Length;
+
+        data.SetVertexBufferParams(vertexCount, plain ? shapeLayout : colorLayout);
+        var positions = data.GetVertexData<float3>(0);
+        for (int i = 0; i < vertexCount; i++)
+            positions[i] = mesher.positions[i];
+        if (!plain)
+        {
+            var normals = data.GetVertexData<float3>(1);
+            var colors = data.GetVertexData<Color32>(2);
+            for (int i = 0; i < vertexCount; i++)
+            {
+                normals[i] = mesher.normals[i];
+                colors[i] = mesher.colors[i];
+            }
+        }
+
+        data.SetIndexBufferParams(indexCount, IndexFormat.UInt32);
+        var indices = data.GetIndexData<uint>();
+        for (int i = 0; i < indexCount; i++)
+            indices[i] = mesher.indices[i];
+
+        // Границы — весь чанк: по ним Unity решает, виден ли чанк камере
+        data.subMeshCount = 1;
+        data.SetSubMesh(0, new SubMeshDescriptor(0, indexCount)
+        {
+            bounds = new Bounds(Vector3.one * (chunkSize * 0.5f), Vector3.one * chunkSize),
+            firstVertex = 0,
+            vertexCount = vertexCount,
+        }, MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+    }
+}
+
+/// <summary>
+/// Жадная склейка граней одного чанка. Соседние грани склеиваются в один прямоугольник,
 /// только если у них одинаковый цвет и одинаковое затенение во всех четырёх углах.
 /// Координаты вершин — в вокселях относительно начала чанка.
 /// Режим plain — меш только формы (без цвета, затенения и нормалей): грани склеиваются
 /// в крупные прямоугольники. Им пользуются коллайдер и NavMesh.
 /// </summary>
-[BurstCompile]
-public struct GreedyMeshJob : IJob
+struct GreedyMesher
 {
-    [ReadOnly] public NativeArray<byte> voxels;
-    [ReadOnly] public NativeArray<byte> faceColors;
+    public NativeArray<byte> voxels;
+    public NativeArray<byte> faceColors;
     public int3 dims;
     public int3 chunkOrigin;
     public int chunkSize;
@@ -23,19 +127,24 @@ public struct GreedyMeshJob : IJob
     public bool water;
     public bool plain;
 
-    public NativeList<float3> positions;
-    public NativeList<float3> normals;
+    public UnsafeList<int> mask;
+    public UnsafeList<float3> positions;
+    public UnsafeList<float3> normals;
     // r — индекс палитры, g — затенение угла (AO), 0..255
-    public NativeList<Color32> colors;
-    public NativeList<uint> indices;
+    public UnsafeList<Color32> colors;
+    public UnsafeList<uint> indices;
 
-    public void Execute()
+    public void Dispose()
     {
-        if (!HasVisibleFaces())
-            return;
+        mask.Dispose();
+        positions.Dispose();
+        normals.Dispose();
+        colors.Dispose();
+        indices.Dispose();
+    }
 
-        var mask = new NativeArray<int>(chunkSize * chunkSize, Allocator.Temp);
-
+    public void Build()
+    {
         for (int d = 0; d < 3; d++)
         {
             int3 ed = Axis(d);
@@ -50,43 +159,15 @@ public struct GreedyMeshJob : IJob
 
                 for (int s = 0; s < chunkSize; s++)
                 {
-                    BuildMask(mask, ed, eu, ev, dir, face, s);
-                    MergeMask(mask, ed, eu, ev, dir, s);
+                    BuildMask(ed, eu, ev, dir, face, s);
+                    MergeMask(ed, eu, ev, dir, s);
                 }
             }
         }
-
-        mask.Dispose();
-    }
-
-    // Грани нет, если в чанке нет блоков нужного меша (воздух сверху карты) или рядом с ними нет
-    // открытых клеток (сплошная порода под землёй). Такие чанки — большая часть арены,
-    // проверка с каймой в один воксель дешевле полного обхода шести направлений
-    bool HasVisibleFaces()
-    {
-        bool hasBlock = false, hasOpen = false;
-        for (int y = -1; y <= chunkSize; y++)
-        {
-            for (int z = -1; z <= chunkSize; z++)
-            {
-                for (int x = -1; x <= chunkSize; x++)
-                {
-                    byte block = GetBlock(chunkOrigin + new int3(x, y, z));
-                    bool inside = x >= 0 && y >= 0 && z >= 0 && x < chunkSize && y < chunkSize && z < chunkSize;
-                    if (inside && block != VoxelBlocks.Air && (block == VoxelBlocks.Water) == water)
-                        hasBlock = true;
-                    if (block == VoxelBlocks.Air || (!water && block == VoxelBlocks.Water))
-                        hasOpen = true;
-                    if (hasBlock && hasOpen)
-                        return true;
-                }
-            }
-        }
-        return false;
     }
 
     // Ключ грани: бит 0 — грань есть, биты 1-8 — цвет, биты 9-16 — AO четырёх углов
-    void BuildMask(NativeArray<int> mask, int3 ed, int3 eu, int3 ev, int dir, int face, int s)
+    void BuildMask(int3 ed, int3 eu, int3 ev, int dir, int face, int s)
     {
         for (int j = 0; j < chunkSize; j++)
         {
@@ -127,7 +208,7 @@ public struct GreedyMeshJob : IJob
         }
     }
 
-    void MergeMask(NativeArray<int> mask, int3 ed, int3 eu, int3 ev, int dir, int s)
+    void MergeMask(int3 ed, int3 eu, int3 ev, int dir, int s)
     {
         for (int j = 0; j < chunkSize; j++)
         {
@@ -146,7 +227,7 @@ public struct GreedyMeshJob : IJob
                     w++;
 
                 int h = 1;
-                while (j + h < chunkSize && RowMatches(mask, key, i, j + h, w))
+                while (j + h < chunkSize && RowMatches(key, i, j + h, w))
                     h++;
 
                 EmitQuad(key, ed, eu, ev, dir, s, i, j, w, h);
@@ -160,7 +241,7 @@ public struct GreedyMeshJob : IJob
         }
     }
 
-    bool RowMatches(NativeArray<int> mask, int key, int i, int row, int w)
+    bool RowMatches(int key, int i, int row, int w)
     {
         for (int k = 0; k < w; k++)
         {

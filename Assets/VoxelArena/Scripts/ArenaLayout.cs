@@ -1,7 +1,9 @@
 using System;
-using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+using Unity.Jobs;
 using Unity.Mathematics;
-using UnityEngine;
 
 public enum ResourceKind
 {
@@ -25,9 +27,9 @@ public struct WallCell
 
 /// <summary>
 /// Раскладка карты по столбцам (x, z): высоты, вода, рампы, базы, ресурсы, деревья, камни.
-/// Индекс столбца: z * sizeX + x.
+/// Индекс столбца: z * sizeX + x. Все данные в нативной памяти — освобождаются Dispose.
 /// </summary>
-public class ArenaLayout
+public sealed class ArenaLayout : IDisposable
 {
     public const byte FlagSand = 1;   // сверху песок (берег, дно озера)
     public const byte FlagCliff = 2;  // край обрыва: под верхним блоком сразу камень
@@ -35,11 +37,11 @@ public class ArenaLayout
     public const byte FlagRock = 8;       // горы по краю: камень до самого верха
     public const byte FlagSoftTop = 16;   // пологий склон горы: сверху трава
 
-    public int sizeX;
-    public int sizeZ;
-    public int[] height;    // число сплошных блоков в столбце
-    public int[] waterTop;  // 0 — нет воды, иначе вода стоит до этого y (не включая)
-    public byte[] flags;
+    public readonly int sizeX;
+    public readonly int sizeZ;
+    public NativeArray<int> height;    // число сплошных блоков в столбце
+    public NativeArray<int> waterTop;  // 0 — нет воды, иначе вода стоит до этого y (не включая)
+    public NativeArray<byte> flags;
 
     public int2 baseOne;
     public int2 baseTwo;
@@ -49,18 +51,18 @@ public class ArenaLayout
     /// Внутри стен какого уровня лежит клетка: 0 — ни в каких, 1..3 — база один, 5..7 — база два (4 + уровень).
     /// Хранится наименьший уровень, в который клетка попадает.
     /// </summary>
-    public byte[] baseZone;
+    public NativeArray<byte> baseZone;
     /// <summary>Ровная площадка базы (под стены 3-го уровня и отступ): 0 — нет, 1 — база один, 2 — база два</summary>
-    public byte[] baseArea;
+    public NativeArray<byte> baseArea;
     /// <summary>Направление от базы один к базе два (единичный вектор в плоскости x, z)</summary>
     public float2 baseAxis;
     /// <summary>Стены 1-го уровня обеих баз</summary>
-    public readonly List<WallCell> walls = new();
+    public NativeList<WallCell> walls;
     /// <summary>Клетка сразу снаружи ворот: [0] — база один, [1] — база два</summary>
-    public readonly List<int2> gates = new();
-    public readonly List<ResourcePoint> resources = new();
-    public readonly List<int2> trees = new();
-    public readonly List<int2> rocks = new();
+    public NativeList<int2> gates;
+    public NativeList<ResourcePoint> resources;
+    public NativeList<int2> trees;
+    public NativeList<int2> rocks;
 
     // Для лога
     public int regionCount;
@@ -68,18 +70,162 @@ public class ArenaLayout
     public int flattenedRegions;
     public bool basesConnected;
     public bool capturePointsReachable;
+
+    public ArenaLayout(int sizeX, int sizeZ)
+    {
+        this.sizeX = sizeX;
+        this.sizeZ = sizeZ;
+        int n = sizeX * sizeZ;
+        height = new NativeArray<int>(n, Allocator.Persistent);
+        waterTop = new NativeArray<int>(n, Allocator.Persistent);
+        flags = new NativeArray<byte>(n, Allocator.Persistent);
+        baseZone = new NativeArray<byte>(n, Allocator.Persistent);
+        baseArea = new NativeArray<byte>(n, Allocator.Persistent);
+        walls = new NativeList<WallCell>(Allocator.Persistent);
+        gates = new NativeList<int2>(2, Allocator.Persistent);
+        resources = new NativeList<ResourcePoint>(Allocator.Persistent);
+        trees = new NativeList<int2>(Allocator.Persistent);
+        rocks = new NativeList<int2>(Allocator.Persistent);
+    }
+
+    public void Dispose()
+    {
+        height.Dispose();
+        waterTop.Dispose();
+        flags.Dispose();
+        baseZone.Dispose();
+        baseArea.Dispose();
+        walls.Dispose();
+        gates.Dispose();
+        resources.Dispose();
+        trees.Dispose();
+        rocks.Dispose();
+    }
 }
 
 /// <summary>
 /// Генератор раскладки: сначала структура (горы по краю, уровни, базы, вода, рампы по графу
 /// связности), потом коридоры и детали. Карта симметрична поворотом на 180° вокруг центра.
 /// Шаги 1:1 повторяют прототип на Python, на котором проверялась проходимость.
+/// Карты шума считаются параллельной джобой, остальное — одной Burst-джобой
+/// (шаги идут друг за другом и зависят от предыдущих).
 /// </summary>
 public static class ArenaLayoutGenerator
 {
+    // Выход джобы, который не помещается в ArenaLayout напрямую
+    const int InfoBaseAx = 0, InfoBaseAz = 1, InfoBaseBx = 2, InfoBaseBz = 3, InfoGateSide = 4,
+              InfoRegions = 5, InfoRamps = 6, InfoFlattened = 7, InfoConnected = 8, InfoCaptures = 9, InfoCount = 10;
+
     public static ArenaLayout Generate(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ)
     {
-        return new Builder(settings, biome, sizeX, sizeY, sizeZ).Run();
+        var layout = new ArenaLayout(sizeX, sizeZ);
+        int n = sizeX * sizeZ;
+
+        var random = new Unity.Mathematics.Random(math.hash(new int2(settings.seed, 7)) | 1u);
+        var levelOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
+        var waterOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
+        var forestOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
+        var mountainOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
+        var borderOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
+
+        var noiseMaps = new NativeArray<float4>(n, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        var info = new NativeArray<int>(InfoCount, Allocator.TempJob);
+        var axis = new NativeArray<float2>(1, Allocator.TempJob);
+
+        var noiseHandle = new SymmetricNoiseJob
+        {
+            settings = settings,
+            sizeX = sizeX,
+            sizeZ = sizeZ,
+            borderOffset = borderOffset,
+            levelOffset = levelOffset,
+            waterOffset = waterOffset,
+            forestOffset = forestOffset,
+            maps = noiseMaps,
+        }.Schedule(n, 256);
+
+        new BuildLayoutJob
+        {
+            s = settings,
+            waterBonus = ArenaBiomes.WaterThresholdBonus(biome),
+            forestScale = ArenaBiomes.ForestDensityScale(biome),
+            rockScale = ArenaBiomes.RockChanceScale(biome),
+            sx = sizeX,
+            sy = sizeY,
+            sz = sizeZ,
+            mountainOffset = mountainOffset,
+            noiseMaps = noiseMaps,
+            outHeight = layout.height,
+            outWaterTop = layout.waterTop,
+            outFlags = layout.flags,
+            outBaseZone = layout.baseZone,
+            outBaseArea = layout.baseArea,
+            outWalls = layout.walls,
+            outGates = layout.gates,
+            outResources = layout.resources,
+            outTrees = layout.trees,
+            outRocks = layout.rocks,
+            outInfo = info,
+            outAxis = axis,
+        }.Schedule(noiseHandle).Complete();
+
+        layout.baseOne = new int2(info[InfoBaseAx], info[InfoBaseAz]);
+        layout.baseTwo = new int2(info[InfoBaseBx], info[InfoBaseBz]);
+        layout.gateSide = info[InfoGateSide];
+        layout.baseAxis = axis[0];
+        layout.regionCount = info[InfoRegions];
+        layout.rampCount = info[InfoRamps];
+        layout.flattenedRegions = info[InfoFlattened];
+        layout.basesConnected = info[InfoConnected] != 0;
+        layout.capturePointsReachable = info[InfoCaptures] != 0;
+
+        noiseMaps.Dispose();
+        info.Dispose();
+        axis.Dispose();
+        return layout;
+    }
+
+    static float Fbm(float2 p, float scale, int octaves, float2 offset)
+    {
+        float sum = 0f, amplitude = 1f, norm = 0f, frequency = scale;
+        for (int o = 0; o < octaves; o++)
+        {
+            sum += noise.snoise(p * frequency + offset) * amplitude;
+            norm += amplitude;
+            amplitude *= 0.5f;
+            frequency *= 2f;
+        }
+        return sum / norm;
+    }
+
+    /// <summary>
+    /// Четыре карты шума на каждую клетку: x — ширина гор, y — уровни, z — вода, w — лес.
+    /// Каждая — среднее двух зеркальных точек, симметричная непрерывная функция.
+    /// Strict: без перестановок и слияния операций с float — в редакторе (Burst) и в WebGL (без Burst)
+    /// пороги шума срабатывают одинаково, карта по сиду та же
+    /// </summary>
+    [BurstCompile(FloatMode = FloatMode.Strict)]
+    struct SymmetricNoiseJob : IJobParallelFor
+    {
+        public ArenaGenSettings settings;
+        public int sizeX, sizeZ;
+        public float2 borderOffset, levelOffset, waterOffset, forestOffset;
+        [WriteOnly] public NativeArray<float4> maps;
+
+        public void Execute(int i)
+        {
+            int x = i % sizeX, z = i / sizeX;
+            var p = new float2(x, z);
+            var q = new float2(sizeX - 1 - x, sizeZ - 1 - z);
+            maps[i] = new float4(
+                Symmetric(p, q, settings.borderNoiseScale, 3, borderOffset),
+                Symmetric(p, q, settings.levelNoiseScale, 3, levelOffset),
+                Symmetric(p, q, settings.waterNoiseScale, 2, waterOffset),
+                Symmetric(p, q, settings.forestNoiseScale, 2, forestOffset));
+        }
+
+        static float Symmetric(float2 p, float2 q, float scale, int octaves, float2 offset) =>
+            0.5f * (Fbm(p, scale, octaves, offset) + Fbm(q, scale, octaves, offset));
     }
 
     struct RampSite
@@ -87,22 +233,54 @@ public static class ArenaLayoutGenerator
         public int x, z, dx, dz;  // (x, z) — нижняя клетка у обрыва, d — шаг к верхней
     }
 
-    class Builder
+    struct RampCell
     {
-        static readonly int2[] Dirs = { new(1, 0), new(-1, 0), new(0, 1), new(0, -1) };
+        public int index;
+        public bool lowSide;
+        public int height;
+    }
 
-        readonly ArenaGenSettings s;
-        readonly ArenaBiome biome;
-        readonly int sx, sy, sz, n;
-        readonly int[] levelHeights;
-        readonly System.Random rnd;
-        readonly float2 levelOffset, waterOffset, forestOffset, mountainOffset, borderOffset;
+    // Место рампы между парой участков: key — (нижний участок, верхний участок), order — порядок обхода карты
+    struct PairSite : IComparable<PairSite>
+    {
+        public long key;
+        public int order;
+        public RampSite site;
 
-        int[] level;
-        int[] edge;          // расстояние до края карты
-        int[] mountainDepth; // расстояние вглубь гор от подножия
-        bool[] border, baseMask, reserved, water, shore, rampMask, wallMask, corridor;
-        int[] height;
+        public int CompareTo(PairSite other) => key != other.key ? key.CompareTo(other.key) : order.CompareTo(other.order);
+    }
+
+    [BurstCompile(FloatMode = FloatMode.Strict)]
+    struct BuildLayoutJob : IJob
+    {
+        public ArenaGenSettings s;
+        public float waterBonus, forestScale, rockScale;
+        public int sx, sy, sz;
+        public float2 mountainOffset;
+        [ReadOnly] public NativeArray<float4> noiseMaps;
+
+        public NativeArray<int> outHeight;
+        public NativeArray<int> outWaterTop;
+        public NativeArray<byte> outFlags;
+        public NativeArray<byte> outBaseZone;
+        public NativeArray<byte> outBaseArea;
+        public NativeList<WallCell> outWalls;
+        public NativeList<int2> outGates;
+        public NativeList<ResourcePoint> outResources;
+        public NativeList<int2> outTrees;
+        public NativeList<int2> outRocks;
+        public NativeArray<int> outInfo;
+        public NativeArray<float2> outAxis;
+
+        int n;
+        DotNetRandom rnd;
+
+        UnsafeList<int> level, edge, mountainDepth, height, comp, parent, queue, previous;
+        UnsafeList<bool> border, baseMask, reserved, water, shore, rampMask, wallMask, corridor;
+        UnsafeList<bool> land, captureReach, seen, cliff, blocked, occupied;
+        UnsafeList<int> compSize, compCell;
+        UnsafeList<int2> captures;
+        UnsafeList<RampCell> cellsA, cellsB;
 
         int2 baseA, baseB;
         float2 axis;       // от A к B
@@ -110,35 +288,49 @@ public static class ArenaLayoutGenerator
         int baseHalf;      // полуразмер ровной площадки базы
         float baseDistance;
         int2 gateOutA, gateOutB;
-
-        // Участки
-        int[] comp;
-        readonly List<int> compSize = new();
-        readonly List<int> compCell = new();
-        int[] parent;
-
-        readonly List<ResourcePoint> resources = new();
-        readonly List<WallCell> walls = new();
-        readonly List<int2> captures = new();
         int rampCount;
 
-        public Builder(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ)
+        static UnsafeList<T> Cells<T>(int count) where T : unmanaged
         {
-            s = settings;
-            this.biome = biome;
-            sx = sizeX;
-            sy = sizeY;
-            sz = sizeZ;
-            n = sx * sz;
-            levelHeights = new[] { s.lowHeight, s.midHeight, s.highHeight };
-            rnd = new System.Random(s.seed);
+            var list = new UnsafeList<T>(count, Allocator.Persistent);
+            list.Resize(count, NativeArrayOptions.ClearMemory);
+            return list;
+        }
 
-            var random = new Unity.Mathematics.Random(math.hash(new int2(s.seed, 7)) | 1u);
-            levelOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
-            waterOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
-            forestOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
-            mountainOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
-            borderOffset = random.NextFloat2(new float2(-5000f), new float2(5000f));
+        // Burst сводит такой цикл к заполнению памяти
+        static void Clear<T>(UnsafeList<T> list) where T : unmanaged
+        {
+            for (int i = 0; i < list.Length; i++)
+                list[i] = default;
+        }
+
+        public void Execute()
+        {
+            n = sx * sz;
+            rnd = new DotNetRandom(s.seed);
+
+            level = Cells<int>(n); edge = Cells<int>(n); mountainDepth = Cells<int>(n); height = Cells<int>(n);
+            comp = Cells<int>(n); queue = Cells<int>(n); previous = Cells<int>(n);
+            parent = new UnsafeList<int>(64, Allocator.Persistent);
+            border = Cells<bool>(n); baseMask = Cells<bool>(n); reserved = Cells<bool>(n); water = Cells<bool>(n);
+            shore = Cells<bool>(n); rampMask = Cells<bool>(n); wallMask = Cells<bool>(n); corridor = Cells<bool>(n);
+            land = Cells<bool>(n); captureReach = Cells<bool>(n); seen = Cells<bool>(n); cliff = Cells<bool>(n);
+            blocked = Cells<bool>(n); occupied = Cells<bool>(n);
+            compSize = new UnsafeList<int>(64, Allocator.Persistent);
+            compCell = new UnsafeList<int>(64, Allocator.Persistent);
+            captures = new UnsafeList<int2>(8, Allocator.Persistent);
+            cellsA = new UnsafeList<RampCell>(64, Allocator.Persistent);
+            cellsB = new UnsafeList<RampCell>(64, Allocator.Persistent);
+
+            Run();
+
+            level.Dispose(); edge.Dispose(); mountainDepth.Dispose(); height.Dispose();
+            comp.Dispose(); queue.Dispose(); previous.Dispose(); parent.Dispose();
+            border.Dispose(); baseMask.Dispose(); reserved.Dispose(); water.Dispose();
+            shore.Dispose(); rampMask.Dispose(); wallMask.Dispose(); corridor.Dispose();
+            land.Dispose(); captureReach.Dispose(); seen.Dispose(); cliff.Dispose();
+            blocked.Dispose(); occupied.Dispose();
+            compSize.Dispose(); compCell.Dispose(); captures.Dispose(); cellsA.Dispose(); cellsB.Dispose();
         }
 
         int Idx(int x, int z) => z * sx + x;
@@ -147,8 +339,17 @@ public static class ArenaLayoutGenerator
         bool Inside(int2 c) => Inside(c.x, c.y);
         int Mirror(int i) => n - 1 - i;
         int2 Mirror(int2 c) => new(sx - 1 - c.x, sz - 1 - c.y);
+        int LevelHeight(int l) => l == 0 ? s.lowHeight : l == 1 ? s.midHeight : s.highHeight;
 
-        public ArenaLayout Run()
+        static int2 Dir(int k) => k switch
+        {
+            0 => new int2(1, 0),
+            1 => new int2(-1, 0),
+            2 => new int2(0, 1),
+            _ => new int2(0, -1),
+        };
+
+        void Run()
         {
             BuildBorder();
             PlaceBases();
@@ -169,59 +370,22 @@ public static class ArenaLayoutGenerator
             BuildMountains();
             BuildCorridors();
 
-            var layout = new ArenaLayout
-            {
-                sizeX = sx,
-                sizeZ = sz,
-                baseOne = baseA,
-                baseTwo = baseB,
-                baseAxis = axis,
-                gateSide = gateSide,
-                regionCount = compSize.Count,
-                rampCount = rampCount,
-                flattenedRegions = flattened,
-            };
-            layout.resources.AddRange(resources);
-            layout.walls.AddRange(walls);
-            layout.gates.Add(gateOutA);
-            layout.gates.Add(gateOutB);
+            outInfo[InfoBaseAx] = baseA.x;
+            outInfo[InfoBaseAz] = baseA.y;
+            outInfo[InfoBaseBx] = baseB.x;
+            outInfo[InfoBaseBz] = baseB.y;
+            outInfo[InfoGateSide] = gateSide;
+            outInfo[InfoRegions] = compSize.Length;
+            outInfo[InfoRamps] = rampCount;
+            outInfo[InfoFlattened] = flattened;
+            outAxis[0] = axis;
+            outGates.Add(gateOutA);
+            outGates.Add(gateOutB);
 
-            PlaceTreesAndRocks(layout);
-            FillLayout(layout);
-            FillBaseZones(layout);
-            CheckReachability(layout);
-            return layout;
-        }
-
-        // ---------- Шум ----------
-
-        float Fbm(float2 p, float scale, int octaves, float2 offset)
-        {
-            float sum = 0f, amplitude = 1f, norm = 0f, frequency = scale;
-            for (int o = 0; o < octaves; o++)
-            {
-                sum += noise.snoise(p * frequency + offset) * amplitude;
-                norm += amplitude;
-                amplitude *= 0.5f;
-                frequency *= 2f;
-            }
-            return sum / norm;
-        }
-
-        // Среднее двух зеркальных точек — симметричная непрерывная функция
-        float[] SymmetricNoise(float scale, int octaves, float2 offset)
-        {
-            var values = new float[n];
-            for (int z = 0; z < sz; z++)
-            {
-                for (int x = 0; x < sx; x++)
-                {
-                    var p = new float2(x, z);
-                    var q = new float2(sx - 1 - x, sz - 1 - z);
-                    values[Idx(x, z)] = 0.5f * (Fbm(p, scale, octaves, offset) + Fbm(q, scale, octaves, offset));
-                }
-            }
-            return values;
+            PlaceTreesAndRocks();
+            FillLayout();
+            FillBaseZones();
+            CheckReachability();
         }
 
         // ---------- Горы по краю ----------
@@ -231,16 +395,13 @@ public static class ArenaLayoutGenerator
         void BuildBorder()
         {
             // Ширина гор меняется по симметричному шуму — край карты неровный, с заливами
-            var widthNoise = SymmetricNoise(s.borderNoiseScale, 3, borderOffset);
-            edge = new int[n];
-            border = new bool[n];
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
                 {
                     int i = Idx(x, z);
                     edge[i] = EdgeDistance(x, z);
-                    float t = math.saturate(widthNoise[i] * 1.6f + 0.45f);
+                    float t = math.saturate(noiseMaps[i].x * 1.6f + 0.45f);
                     border[i] = edge[i] < math.lerp(s.borderMinWidth, s.borderMaxWidth, t);
                 }
             }
@@ -249,14 +410,17 @@ public static class ArenaLayoutGenerator
         // Горы не заходят на площадку базы и отступ вокруг неё
         void ClearBorderAroundBases()
         {
-            foreach (var b in new[] { baseA, baseB })
-            {
-                int r = baseHalf + 6;
-                for (int z = b.y - r; z <= b.y + r; z++)
-                    for (int x = b.x - r; x <= b.x + r; x++)
-                        if (Inside(x, z) && edge[Idx(x, z)] >= s.borderMinWidth)
-                            border[Idx(x, z)] = false;
-            }
+            ClearBorderAround(baseA);
+            ClearBorderAround(baseB);
+        }
+
+        void ClearBorderAround(int2 b)
+        {
+            int r = baseHalf + 6;
+            for (int z = b.y - r; z <= b.y + r; z++)
+                for (int x = b.x - r; x <= b.x + r; x++)
+                    if (Inside(x, z) && edge[Idx(x, z)] >= s.borderMinWidth)
+                        border[Idx(x, z)] = false;
         }
 
         // ---------- Базы на случайной оси через центр ----------
@@ -303,22 +467,22 @@ public static class ArenaLayoutGenerator
 
         void BuildLevels()
         {
-            var values = SymmetricNoise(s.levelNoiseScale, 3, levelOffset);
-
             // Пороги по долям площади внутри гор, чтобы соотношение уровней не зависело от сида
-            var inner = new List<float>();
+            var inner = new UnsafeList<float>(n, Allocator.Persistent);
             for (int i = 0; i < n; i++)
                 if (!border[i])
-                    inner.Add(values[i]);
+                    inner.Add(noiseMaps[i].y);
             inner.Sort();
-            float t1 = inner[Mathf.Clamp((int)(inner.Count * s.lowShare), 0, inner.Count - 1)];
-            float t2 = inner[Mathf.Clamp((int)(inner.Count * (1f - s.highShare)), 0, inner.Count - 1)];
+            float t1 = inner[math.clamp((int)(inner.Length * s.lowShare), 0, inner.Length - 1)];
+            float t2 = inner[math.clamp((int)(inner.Length * (1f - s.highShare)), 0, inner.Length - 1)];
+            inner.Dispose();
 
-            level = new int[n];
             for (int i = 0; i < n; i++)
-                level[i] = values[i] < t1 ? 0 : values[i] < t2 ? 1 : 2;
+            {
+                float value = noiseMaps[i].y;
+                level[i] = value < t1 ? 0 : value < t2 ? 1 : 2;
+            }
 
-            baseMask = new bool[n];
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -347,51 +511,52 @@ public static class ArenaLayoutGenerator
 
         void SmoothLevels()
         {
-            var counts = new int[3];
+            var next = new UnsafeList<int>(n, Allocator.Persistent);
+            next.Resize(n);
             for (int iteration = 0; iteration < 3; iteration++)
             {
-                var next = (int[])level.Clone();
+                next.CopyFrom(level);
                 for (int z = 0; z < sz; z++)
                 {
                     for (int x = 0; x < sx; x++)
                     {
-                        counts[0] = counts[1] = counts[2] = 0;
+                        int3 counts = 0;
                         for (int dz = -2; dz <= 2; dz++)
                             for (int dx = -2; dx <= 2; dx++)
                                 if (Inside(x + dx, z + dz))
                                     counts[level[Idx(x + dx, z + dz)]]++;
 
                         int current = level[Idx(x, z)];
-                        int best = math.max(counts[0], math.max(counts[1], counts[2]));
+                        int best = math.cmax(counts);
                         if (counts[current] == best)
                             continue;
 
                         // При равенстве — меньший уровень (правило одно для обеих половин карты)
-                        next[Idx(x, z)] = counts[0] == best ? 0 : counts[1] == best ? 1 : 2;
+                        next[Idx(x, z)] = counts.x == best ? 0 : counts.y == best ? 1 : 2;
                     }
                 }
-                level = next;
+                (level, next) = (next, level);
                 ForceLevels();
             }
+            next.Dispose();
         }
 
         // ---------- Участки ----------
 
-        void BuildComponents(bool[] valid)
+        // valid.IsCreated == false — все клетки
+        void BuildComponents(UnsafeList<bool> valid, bool useValid)
         {
-            comp = new int[n];
             for (int i = 0; i < n; i++)
                 comp[i] = -1;
             compSize.Clear();
             compCell.Clear();
 
-            var queue = new int[n];
             for (int start = 0; start < n; start++)
             {
-                if (comp[start] >= 0 || (valid != null && !valid[start]))
+                if (comp[start] >= 0 || (useValid && !valid[start]))
                     continue;
 
-                int id = compSize.Count;
+                int id = compSize.Length;
                 int key = level[start];
                 int head = 0, tail = 0;
                 queue[tail++] = start;
@@ -401,13 +566,14 @@ public static class ArenaLayoutGenerator
                 {
                     int i = queue[head++];
                     int x = i % sx, z = i / sx;
-                    foreach (var d in Dirs)
+                    for (int k = 0; k < 4; k++)
                     {
+                        var d = Dir(k);
                         int xx = x + d.x, zz = z + d.y;
                         if (!Inside(xx, zz))
                             continue;
                         int j = Idx(xx, zz);
-                        if (comp[j] >= 0 || level[j] != key || (valid != null && !valid[j]))
+                        if (comp[j] >= 0 || level[j] != key || (useValid && !valid[j]))
                             continue;
                         comp[j] = id;
                         queue[tail++] = j;
@@ -419,62 +585,85 @@ public static class ArenaLayoutGenerator
             }
         }
 
+        // По участку: сколько соседних клеток каждого уровня; best — самый частый уровень, при равенстве меньший
+        static int MostCommonLevel(int3 counts)
+        {
+            int best = math.cmax(counts);
+            if (best == 0)
+                return -1;
+            return counts.x == best ? 0 : counts.y == best ? 1 : 2;
+        }
+
         // ---------- 3. Мелкие участки вливаются в соседей ----------
 
         void RemoveSmallRegions()
         {
+            var counts = new UnsafeList<int3>(64, Allocator.Persistent);
+            var target = new UnsafeList<bool>(64, Allocator.Persistent);
+            var newLevel = new UnsafeList<int>(64, Allocator.Persistent);
+
             for (int pass = 0; pass < 6; pass++)
             {
-                BuildComponents(null);
+                BuildComponents(default, false);
 
-                var target = new Dictionary<int, int[]>();
-                for (int c = 0; c < compSize.Count; c++)
-                    if (compSize[c] < s.minRegionCells)
-                        target[c] = new int[3];
-
-                if (target.Count == 0)
-                    return;
+                int compCount = compSize.Length;
+                counts.Resize(compCount, NativeArrayOptions.ClearMemory);
+                Clear(counts);
+                target.Resize(compCount);
+                bool any = false;
+                for (int c = 0; c < compCount; c++)
+                {
+                    target[c] = compSize[c] < s.minRegionCells;
+                    any |= target[c];
+                }
+                if (!any)
+                    break;
 
                 for (int i = 0; i < n; i++)
                 {
-                    if (!target.TryGetValue(comp[i], out var counts))
+                    int c = comp[i];
+                    if (!target[c])
                         continue;
                     int x = i % sx, z = i / sx;
-                    foreach (var d in Dirs)
+                    for (int k = 0; k < 4; k++)
                     {
+                        var d = Dir(k);
                         int xx = x + d.x, zz = z + d.y;
-                        if (Inside(xx, zz) && comp[Idx(xx, zz)] != comp[i])
-                            counts[level[Idx(xx, zz)]]++;
+                        if (Inside(xx, zz) && comp[Idx(xx, zz)] != c)
+                        {
+                            var cnt = counts[c];
+                            cnt[level[Idx(xx, zz)]]++;
+                            counts[c] = cnt;
+                        }
                     }
                 }
 
                 // Все мелкие участки меняются одновременно — симметрия сохраняется
-                var newLevel = new Dictionary<int, int>();
-                foreach (var pair in target)
-                {
-                    var counts = pair.Value;
-                    int best = math.max(counts[0], math.max(counts[1], counts[2]));
-                    if (best == 0)
-                        continue;
-                    newLevel[pair.Key] = counts[0] == best ? 0 : counts[1] == best ? 1 : 2;
-                }
+                newLevel.Resize(compCount);
+                for (int c = 0; c < compCount; c++)
+                    newLevel[c] = target[c] ? MostCommonLevel(counts[c]) : -1;
 
                 for (int i = 0; i < n; i++)
-                    if (newLevel.TryGetValue(comp[i], out int l))
+                {
+                    int l = newLevel[comp[i]];
+                    if (l >= 0)
                         level[i] = l;
+                }
 
                 ForceLevels();
             }
+
+            counts.Dispose();
+            target.Dispose();
+            newLevel.Dispose();
         }
 
         // ---------- 4. База: стены и ворота ----------
 
         void PlaceBaseContent()
         {
-            reserved = new bool[n];
             for (int i = 0; i < n; i++)
                 reserved[i] = baseMask[i] || border[i];
-            wallMask = new bool[n];
 
             // Стены 1-го уровня базы A в каноническом виде (ворота на +z), затем поворот к противнику.
             // База B — зеркальная копия.
@@ -503,44 +692,45 @@ public static class ArenaLayoutGenerator
 
         void AddWall(int2 cell, bool outer)
         {
-            walls.Add(new WallCell { cell = cell, outer = outer });
+            outWalls.Add(new WallCell { cell = cell, outer = outer });
             wallMask[Idx(cell)] = true;
         }
 
         // ---------- Точки захвата ----------
 
-        bool[] captureReach;
-
         void PlaceCapturePoints()
         {
-            captureReach = Walk(gateOutA, wallMask, null);
+            Walk(gateOutA, wallMask, captureReach, false);
 
             var center = new float2((sx - 1) * 0.5f, (sz - 1) * 0.5f);
             var perp = new float2(-axis.y, axis.x);
             float size = math.min(sx, sz);
 
-            var targets = new[]
+            for (int k = 0; k < 4; k++)
             {
-                (float2)baseA + axis * (baseHalf + 14),                                       // ближняя
-                center - axis * baseDistance * 0.35f + perp * size * 0.30f,                   // фланги
-                center - axis * baseDistance * 0.35f - perp * size * 0.30f,
-                center + perp * size * 0.12f,                                                 // спорная у центра
-            };
+                var target = k switch
+                {
+                    0 => (float2)baseA + axis * (baseHalf + 14),                                  // ближняя
+                    1 => center - axis * baseDistance * 0.35f + perp * size * 0.30f,              // фланги
+                    2 => center - axis * baseDistance * 0.35f - perp * size * 0.30f,
+                    _ => center + perp * size * 0.12f,                                            // спорная у центра
+                };
 
-            foreach (var target in targets)
-            {
                 if (!SnapCapturePoint((int2)math.round(target), out var cell))
                     continue;
 
-                foreach (var c in new[] { cell, Mirror(cell) })
-                {
-                    captures.Add(c);
-                    resources.Add(new ResourcePoint { cell = c, kind = ResourceKind.CapturePoint, team = -1 });
-                    for (int dz = -4; dz <= 4; dz++)
-                        for (int dx = -4; dx <= 4; dx++)
-                            reserved[Idx(c.x + dx, c.y + dz)] = true;
-                }
+                AddCapturePoint(cell);
+                AddCapturePoint(Mirror(cell));
             }
+        }
+
+        void AddCapturePoint(int2 c)
+        {
+            captures.Add(c);
+            outResources.Add(new ResourcePoint { cell = c, kind = ResourceKind.CapturePoint, team = -1 });
+            for (int dz = -4; dz <= 4; dz++)
+                for (int dx = -4; dx <= 4; dx++)
+                    reserved[Idx(c.x + dx, c.y + dz)] = true;
         }
 
         // Ближайшая к цели клетка, вокруг которой 9x9 одного уровня и ничего не занято
@@ -593,16 +783,14 @@ public static class ArenaLayoutGenerator
 
         void PlaceWater()
         {
-            var wet = SymmetricNoise(s.waterNoiseScale, 2, waterOffset);
-            float threshold = s.waterThreshold + ArenaBiomes.WaterThresholdBonus(biome);
+            float threshold = s.waterThreshold + waterBonus;
 
-            water = new bool[n];
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
                 {
                     int i = Idx(x, z);
-                    if (level[i] != 0 || wet[i] < threshold)
+                    if (level[i] != 0 || noiseMaps[i].z < threshold)
                         continue;
 
                     // Вокруг 7x7 — только низина без резерва
@@ -620,12 +808,11 @@ public static class ArenaLayoutGenerator
             }
 
             // Мелкие лужи убираем
-            BuildComponents(water);
+            BuildComponents(water, true);
             for (int i = 0; i < n; i++)
                 if (water[i] && compSize[comp[i]] < s.minLakeCells)
                     water[i] = false;
 
-            shore = new bool[n];
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -659,15 +846,14 @@ public static class ArenaLayoutGenerator
         bool IsLand(int i) => !water[i] && !border[i];
 
         // Клетки рампы: половина на нижнем уровне, половина на верхнем, подъём 1 блок на 2 клетки
-        void RampCells(RampSite site, int width, List<(int index, bool lowSide, int height)> cells, out bool inside)
+        bool RampCells(RampSite site, int width, ref UnsafeList<RampCell> cells)
         {
             cells.Clear();
-            inside = true;
 
             int lo = level[Idx(site.x, site.z)];
             int hi = level[Idx(site.x + site.dx, site.z + site.dz)];
-            int loH = levelHeights[lo];
-            int step = levelHeights[hi] - loH;
+            int loH = LevelHeight(lo);
+            int step = LevelHeight(hi) - loH;
             int half = step;
             int px = -site.dz, pz = site.dx;
 
@@ -678,59 +864,59 @@ public static class ArenaLayoutGenerator
                     int x = site.x + site.dx * (t + 1) + px * w;
                     int z = site.z + site.dz * (t + 1) + pz * w;
                     if (!Inside(x, z))
-                    {
-                        inside = false;
-                        return;
-                    }
+                        return false;
 
                     // (t + half + 0.5) * step / (2 * half) никогда не попадает ровно на .5
                     float h = loH + step * (t + half + 0.5f) / (2f * half);
-                    cells.Add((Idx(x, z), t < 0, (int)math.round(h)));
+                    cells.Add(new RampCell { index = Idx(x, z), lowSide = t < 0, height = (int)math.round(h) });
                 }
             }
+            return true;
         }
 
-        readonly List<(int index, bool lowSide, int height)> cellsA = new();
-        readonly List<(int index, bool lowSide, int height)> cellsB = new();
-
-        bool RampValid(RampSite site, int width, List<(int index, bool lowSide, int height)> cells)
+        bool RampValid(RampSite site, int width, ref UnsafeList<RampCell> cells)
         {
-            RampCells(site, width, cells, out bool inside);
-            if (!inside)
+            if (!RampCells(site, width, ref cells))
                 return false;
 
             int lo = level[Idx(site.x, site.z)];
             int hi = level[Idx(site.x + site.dx, site.z + site.dz)];
 
-            foreach (var (index, lowSide, _) in cells)
+            for (int k = 0; k < cells.Length; k++)
             {
-                if (water[index] || reserved[index] || rampMask[index])
+                var cell = cells[k];
+                if (water[cell.index] || reserved[cell.index] || rampMask[cell.index])
                     return false;
-                if (level[index] != (lowSide ? lo : hi))
+                if (level[cell.index] != (cell.lowSide ? lo : hi))
                     return false;
             }
             return true;
         }
 
-        void StampRamp(List<(int index, bool lowSide, int height)> cells)
+        void StampRamp(UnsafeList<RampCell> cells)
         {
-            foreach (var (index, _, h) in cells)
+            for (int k = 0; k < cells.Length; k++)
             {
-                height[index] = h;
-                rampMask[index] = true;
-                shore[index] = false;
+                var cell = cells[k];
+                height[cell.index] = cell.height;
+                rampMask[cell.index] = true;
+                shore[cell.index] = false;
             }
             rampCount++;
         }
 
-        bool TryAddRamp(List<RampSite> sites, int width)
+        // Места рампы пары — sites[start .. start + count) в порядке обхода карты
+        bool TryAddRamp(UnsafeList<PairSite> sites, int start, int count, int width, ref UnsafeList<RampSite> order)
         {
-            var order = new List<RampSite>(sites);
-            Shuffle(order);
+            order.Clear();
+            for (int k = 0; k < count; k++)
+                order.Add(sites[start + k].site);
+            Shuffle(ref order);
 
-            foreach (var site in order)
+            for (int k = 0; k < order.Length; k++)
             {
-                if (!RampValid(site, width, cellsA))
+                var site = order[k];
+                if (!RampValid(site, width, ref cellsA))
                     continue;
 
                 int i = Idx(site.x, site.z);
@@ -742,16 +928,14 @@ public static class ArenaLayoutGenerator
                 }
 
                 var mirror = new RampSite { x = mi % sx, z = mi / sx, dx = -site.dx, dz = -site.dz };
-                if (!RampValid(mirror, width, cellsB))
+                if (!RampValid(mirror, width, ref cellsB))
                     continue;
 
                 // Рампа и её зеркальная копия не должны налезать друг на друга
-                var used = new HashSet<int>();
-                foreach (var c in cellsA)
-                    used.Add(c.index);
                 bool overlap = false;
-                foreach (var c in cellsB)
-                    overlap |= used.Contains(c.index);
+                for (int a = 0; a < cellsA.Length && !overlap; a++)
+                    for (int b = 0; b < cellsB.Length && !overlap; b++)
+                        overlap = cellsA[a].index == cellsB[b].index;
                 if (overlap)
                     continue;
 
@@ -765,20 +949,18 @@ public static class ArenaLayoutGenerator
         /// <summary>Возвращает true, если вся суша связана с базой.</summary>
         bool PlaceRamps(ref int flattened)
         {
-            var land = new bool[n];
             for (int i = 0; i < n; i++)
                 land[i] = IsLand(i);
 
-            BuildComponents(land);
+            BuildComponents(land, true);
 
-            height = new int[n];
             for (int i = 0; i < n; i++)
-                height[i] = levelHeights[level[i]];
-            rampMask = new bool[n];
+                height[i] = LevelHeight(level[i]);
+            Clear(rampMask);
             rampCount = 0;
 
             // Кандидаты: пары (нижний участок, верхний участок) через уступ в один уровень
-            var pairSites = new Dictionary<long, List<RampSite>>();
+            var sites = new UnsafeList<PairSite>(1024, Allocator.Persistent);
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -786,8 +968,9 @@ public static class ArenaLayoutGenerator
                     int i = Idx(x, z);
                     if (!land[i])
                         continue;
-                    foreach (var d in Dirs)
+                    for (int k = 0; k < 4; k++)
                     {
+                        var d = Dir(k);
                         int xx = x + d.x, zz = z + d.y;
                         if (!Inside(xx, zz))
                             continue;
@@ -795,96 +978,133 @@ public static class ArenaLayoutGenerator
                         if (!land[j] || level[j] - level[i] != 1)
                             continue;
 
-                        long key = (long)comp[i] * 1_000_000 + comp[j];
-                        if (!pairSites.TryGetValue(key, out var list))
-                            pairSites[key] = list = new List<RampSite>();
-                        list.Add(new RampSite { x = x, z = z, dx = d.x, dz = d.y });
+                        sites.Add(new PairSite
+                        {
+                            key = (long)comp[i] * 1_000_000 + comp[j],
+                            order = sites.Length,
+                            site = new RampSite { x = x, z = z, dx = d.x, dz = d.y },
+                        });
                     }
                 }
             }
+            // По паре — непрерывный отрезок мест в порядке обхода; пары по возрастанию ключа
+            sites.Sort();
 
-            parent = new int[compSize.Count];
-            for (int c = 0; c < parent.Length; c++)
+            var pairKey = new UnsafeList<long>(64, Allocator.Persistent);
+            var pairStart = new UnsafeList<int>(64, Allocator.Persistent);
+            for (int k = 0; k < sites.Length; k++)
+            {
+                if (k == 0 || sites[k].key != sites[k - 1].key)
+                {
+                    pairKey.Add(sites[k].key);
+                    pairStart.Add(k);
+                }
+            }
+            pairStart.Add(sites.Length);
+            int pairCount = pairKey.Length;
+
+            var pairs = new UnsafeList<int>(pairCount, Allocator.Persistent);
+            for (int p = 0; p < pairCount; p++)
+                pairs.Add(p);
+            Shuffle(ref pairs);
+
+            int compCount = compSize.Length;
+            parent.Resize(compCount);
+            for (int c = 0; c < compCount; c++)
                 parent[c] = c;
 
-            var pairs = new List<long>(pairSites.Keys);
-            pairs.Sort();
-            Shuffle(pairs);
+            var order = new UnsafeList<RampSite>(64, Allocator.Persistent);
+            var withRamp = new UnsafeList<bool>(pairCount, Allocator.Persistent);
+            withRamp.Resize(pairCount, NativeArrayOptions.ClearMemory);
 
             // Остов: рампа там, где участки ещё не связаны
-            var withRamp = new HashSet<long>();
-            foreach (long key in pairs)
+            for (int k = 0; k < pairCount; k++)
             {
+                int p = pairs[k];
+                long key = pairKey[p];
                 int a = (int)(key / 1_000_000), b = (int)(key % 1_000_000);
                 if (Find(a) == Find(b))
                     continue;
-                if (!TryAddRamp(pairSites[key], s.rampWidth))
+                if (!TryAddRamp(sites, pairStart[p], pairStart[p + 1] - pairStart[p], s.rampWidth, ref order))
                     continue;
 
                 Union(a, b);
                 Union(MirrorComp(a), MirrorComp(b));
-                withRamp.Add(key);
+                withRamp[p] = true;
             }
 
             // Лишние рампы — чтобы к каждому месту было больше одного пути
-            foreach (long key in pairs)
+            for (int k = 0; k < pairCount; k++)
             {
-                if (withRamp.Contains(key) || rnd.NextDouble() >= s.extraRampChance)
+                int p = pairs[k];
+                if (withRamp[p] || rnd.NextDouble() >= s.extraRampChance)
                     continue;
-                if (TryAddRamp(pairSites[key], s.rampWidth))
-                    withRamp.Add(key);
+                if (TryAddRamp(sites, pairStart[p], pairStart[p + 1] - pairStart[p], s.rampWidth, ref order))
+                    withRamp[p] = true;
             }
 
+            sites.Dispose();
+            pairKey.Dispose();
+            pairStart.Dispose();
+            pairs.Dispose();
+            order.Dispose();
+            withRamp.Dispose();
+
             int baseComp = comp[Idx(baseA)];
-            if (AllConnected(baseComp))
+            int root = Find(baseComp);
+            bool allConnected = true;
+            for (int c = 0; c < compCount && allConnected; c++)
+                allConnected = Find(c) == root;
+            if (allConnected)
                 return true;
 
             // Запасной путь: оторванный участок выравнивается под соседний связанный уровень
-            var counts = new Dictionary<int, int[]>();
-            for (int c = 0; c < compSize.Count; c++)
-                if (Find(c) != Find(baseComp))
-                    counts[c] = new int[3];
+            var counts = new UnsafeList<int3>(compCount, Allocator.Persistent);
+            counts.Resize(compCount, NativeArrayOptions.ClearMemory);
+            var detached = new UnsafeList<bool>(compCount, Allocator.Persistent);
+            detached.Resize(compCount);
+            int detachedCount = 0;
+            for (int c = 0; c < compCount; c++)
+            {
+                detached[c] = Find(c) != root;
+                if (detached[c])
+                    detachedCount++;
+            }
 
             for (int i = 0; i < n; i++)
             {
-                if (!land[i] || !counts.TryGetValue(comp[i], out var cnt))
+                if (!land[i] || !detached[comp[i]])
                     continue;
                 int x = i % sx, z = i / sx;
-                foreach (var d in Dirs)
+                for (int k = 0; k < 4; k++)
                 {
+                    var d = Dir(k);
                     int xx = x + d.x, zz = z + d.y;
                     if (!Inside(xx, zz))
                         continue;
                     int j = Idx(xx, zz);
-                    if (land[j] && comp[j] != comp[i] && Find(comp[j]) == Find(baseComp))
+                    if (land[j] && comp[j] != comp[i] && Find(comp[j]) == root)
+                    {
+                        var cnt = counts[comp[i]];
                         cnt[level[j]]++;
+                        counts[comp[i]] = cnt;
+                    }
                 }
             }
 
-            var newLevel = new Dictionary<int, int>();
-            foreach (var pair in counts)
+            for (int i = 0; i < n; i++)
             {
-                var cnt = pair.Value;
-                int best = math.max(cnt[0], math.max(cnt[1], cnt[2]));
-                if (best > 0)
-                    newLevel[pair.Key] = cnt[0] == best ? 0 : cnt[1] == best ? 1 : 2;
+                if (!land[i] || !detached[comp[i]])
+                    continue;
+                int l = MostCommonLevel(counts[comp[i]]);
+                if (l >= 0)
+                    level[i] = l;
             }
 
-            for (int i = 0; i < n; i++)
-                if (land[i] && newLevel.TryGetValue(comp[i], out int l))
-                    level[i] = l;
-
-            flattened += counts.Count;
+            counts.Dispose();
+            detached.Dispose();
+            flattened += detachedCount;
             return false;
-        }
-
-        bool AllConnected(int baseComp)
-        {
-            int root = Find(baseComp);
-            for (int c = 0; c < compSize.Count; c++)
-                if (Find(c) != root)
-                    return false;
-            return true;
         }
 
         // ---------- Проходимость по сетке ----------
@@ -903,48 +1123,45 @@ public static class ArenaLayoutGenerator
         /// <summary>
         /// Обход от старта: шаг по высоте не больше блока. Клетка проходима, если в квадрате
         /// ClearanceRadius вокруг неё нет препятствий и обрывов (перепад больше блока между соседями).
+        /// Достигнутые клетки — в reached; withPrevious — запомнить, откуда пришли (previous).
         /// </summary>
-        bool[] Walk(int2 start, bool[] obstacles, int[] previous)
+        void Walk(int2 start, UnsafeList<bool> obstacles, UnsafeList<bool> reached, bool withPrevious)
         {
-            var seen = new bool[n];
-            if (previous != null)
+            Clear(reached);
+            if (withPrevious)
                 for (int i = 0; i < n; i++)
                     previous[i] = -1;
             MarkCliffs();
 
-            var queue = new int[n];
             int head = 0, tail = 0;
             int s0 = Idx(start);
             queue[tail++] = s0;
-            seen[s0] = true;
+            reached[s0] = true;
 
             while (head < tail)
             {
                 int i = queue[head++];
                 int x = i % sx, z = i / sx;
-                foreach (var d in Dirs)
+                for (int k = 0; k < 4; k++)
                 {
+                    var d = Dir(k);
                     int xx = x + d.x, zz = z + d.y;
                     if (!Inside(xx, zz))
                         continue;
                     int j = Idx(xx, zz);
-                    if (seen[j] || math.abs(height[j] - height[i]) > 1 || !Walkable(xx, zz, obstacles))
+                    if (reached[j] || math.abs(height[j] - height[i]) > 1 || !Walkable(xx, zz, obstacles))
                         continue;
-                    seen[j] = true;
-                    if (previous != null)
+                    reached[j] = true;
+                    if (withPrevious)
                         previous[j] = i;
                     queue[tail++] = j;
                 }
             }
-            return seen;
         }
-
-        bool[] cliff;
 
         // Обрыв: у клетки есть сосед выше или ниже больше чем на блок (рампа — ступени по блоку)
         void MarkCliffs()
         {
-            cliff ??= new bool[n];
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -960,9 +1177,7 @@ public static class ArenaLayoutGenerator
             }
         }
 
-        bool Blocked(int i, bool[] obstacles) => water[i] || border[i] || obstacles[i];
-
-        bool Walkable(int x, int z, bool[] obstacles)
+        bool Walkable(int x, int z, UnsafeList<bool> obstacles)
         {
             for (int dz = -ClearanceRadius; dz <= ClearanceRadius; dz++)
             {
@@ -972,7 +1187,7 @@ public static class ArenaLayoutGenerator
                     if (!Inside(xx, zz))
                         return false;
                     int j = Idx(xx, zz);
-                    if (Blocked(j, obstacles) || cliff[j])
+                    if (water[j] || border[j] || obstacles[j] || cliff[j])
                         return false;
                 }
             }
@@ -980,7 +1195,7 @@ public static class ArenaLayoutGenerator
         }
 
         // Ближайшая к цели клетка, до которой дошёл обход (центр точки захвата занят бугром)
-        int NearestSeen(int2 goal, bool[] seen, int radius)
+        int NearestSeen(int2 goal, UnsafeList<bool> reached, int radius)
         {
             for (int r = 0; r <= radius; r++)
             {
@@ -989,7 +1204,7 @@ public static class ArenaLayoutGenerator
                     for (int dx = -r; dx <= r; dx++)
                     {
                         var c = goal + new int2(dx, dz);
-                        if (Inside(c) && seen[Idx(c)])
+                        if (Inside(c) && reached[Idx(c)])
                             return Idx(c);
                     }
                 }
@@ -1002,16 +1217,15 @@ public static class ArenaLayoutGenerator
         void BuildMountains()
         {
             // Расстояние вглубь гор от подножия
-            mountainDepth = new int[n];
-            var queue = new int[n];
             int head = 0, tail = 0;
             for (int i = 0; i < n; i++)
             {
                 if (!border[i])
                     continue;
                 int x = i % sx, z = i / sx;
-                foreach (var d in Dirs)
+                for (int k = 0; k < 4; k++)
                 {
+                    var d = Dir(k);
                     int xx = x + d.x, zz = z + d.y;
                     if (Inside(xx, zz) && !border[Idx(xx, zz)])
                     {
@@ -1025,8 +1239,9 @@ public static class ArenaLayoutGenerator
             {
                 int i = queue[head++];
                 int x = i % sx, z = i / sx;
-                foreach (var d in Dirs)
+                for (int k = 0; k < 4; k++)
                 {
+                    var d = Dir(k);
                     int xx = x + d.x, zz = z + d.y;
                     if (!Inside(xx, zz))
                         continue;
@@ -1058,22 +1273,20 @@ public static class ArenaLayoutGenerator
 
         void BuildCorridors()
         {
-            corridor = new bool[n];
-            var previous = new int[n];
-            var seen = Walk(gateOutA, wallMask, previous);
+            Walk(gateOutA, wallMask, seen, true);
 
-            var goals = new List<int2> { gateOutB };
-            goals.AddRange(captures);
+            MarkPath(NearestSeen(gateOutB, seen, CaptureReachRadius));
+            for (int k = 0; k < captures.Length; k++)
+                MarkPath(NearestSeen(captures[k], seen, CaptureReachRadius));
+        }
 
-            foreach (var goal in goals)
+        void MarkPath(int cur)
+        {
+            while (cur >= 0)
             {
-                int cur = NearestSeen(goal, seen, CaptureReachRadius);
-                while (cur >= 0)
-                {
-                    MarkCorridor(cur);
-                    MarkCorridor(Mirror(cur));
-                    cur = previous[cur];
-                }
+                MarkCorridor(cur);
+                MarkCorridor(Mirror(cur));
+                cur = previous[cur];
             }
         }
 
@@ -1088,13 +1301,11 @@ public static class ArenaLayoutGenerator
 
         // ---------- 8. Деревья и камни ----------
 
-        void PlaceTreesAndRocks(ArenaLayout layout)
+        void PlaceTreesAndRocks()
         {
-            var forest = SymmetricNoise(s.forestNoiseScale, 2, forestOffset);
-            float density = s.forestDensity * ArenaBiomes.ForestDensityScale(biome);
-            float rockChance = s.rockChance * ArenaBiomes.RockChanceScale(biome);
+            float density = s.forestDensity * forestScale;
+            float rockChance = s.rockChance * rockScale;
 
-            var blocked = new bool[n];
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -1110,16 +1321,16 @@ public static class ArenaLayoutGenerator
                 }
             }
 
-            var occupied = new bool[n];
-            var candidates = new List<int>();
+            var candidates = new UnsafeList<int>(n / 2, Allocator.Persistent);
             for (int i = 0; i < n / 2; i++)
                 candidates.Add(i);
-            Shuffle(candidates);
+            Shuffle(ref candidates);
 
-            foreach (int i in candidates)
+            for (int k = 0; k < candidates.Length; k++)
             {
+                int i = candidates[k];
                 bool tree;
-                if (forest[i] > s.forestThreshold && rnd.NextDouble() < density)
+                if (noiseMaps[i].w > s.forestThreshold && rnd.NextDouble() < density)
                     tree = true;
                 else if (rnd.NextDouble() < rockChance)
                     tree = false;
@@ -1127,18 +1338,25 @@ public static class ArenaLayoutGenerator
                     continue;
 
                 int mi = Mirror(i);
-                if (!Free(i, blocked, occupied) || !Flat3(i) || !Free(mi, blocked, occupied) || !Flat3(mi))
+                if (!Free(i) || !Flat3(i) || !Free(mi) || !Flat3(mi))
                     continue;
 
-                foreach (int c in new[] { i, mi })
-                {
-                    var cell = new int2(c % sx, c / sx);
-                    (tree ? layout.trees : layout.rocks).Add(cell);
-                    Mark(c, occupied);
-                }
+                AddTreeOrRock(i, tree);
+                AddTreeOrRock(mi, tree);
             }
+            candidates.Dispose();
 
-            PlaceMountainTrees(layout, forest, density);
+            PlaceMountainTrees(density);
+        }
+
+        void AddTreeOrRock(int c, bool tree)
+        {
+            var cell = new int2(c % sx, c / sx);
+            if (tree)
+                outTrees.Add(cell);
+            else
+                outRocks.Add(cell);
+            Mark(c);
         }
 
         // Пологий склон: соседи отличаются по высоте не больше чем на блок
@@ -1153,14 +1371,16 @@ public static class ArenaLayoutGenerator
         }
 
         // Лес на нижних пологих склонах гор. Горы непроходимы, симметрия тут не нужна.
-        void PlaceMountainTrees(ArenaLayout layout, float[] forest, float density)
+        // Занятые клетки — в seen: он уже не нужен после коридоров
+        void PlaceMountainTrees(float density)
         {
-            var taken = new bool[n];
+            var taken = seen;
+            Clear(taken);
             for (int i = 0; i < n; i++)
             {
                 if (!border[i] || mountainDepth[i] < 2 || mountainDepth[i] > 10)
                     continue;
-                if (forest[i] < s.forestThreshold - 0.1f || rnd.NextDouble() > density * 0.35)
+                if (noiseMaps[i].w < s.forestThreshold - 0.1f || rnd.NextDouble() > density * 0.35)
                     continue;
 
                 int x = i % sx, z = i / sx;
@@ -1174,7 +1394,7 @@ public static class ArenaLayoutGenerator
                 if (!free)
                     continue;
 
-                layout.trees.Add(new int2(x, z));
+                outTrees.Add(new int2(x, z));
                 for (int dz = -2; dz <= 2; dz++)
                     for (int dx = -2; dx <= 2; dx++)
                         taken[Idx(x + dx, z + dz)] = true;
@@ -1182,7 +1402,7 @@ public static class ArenaLayoutGenerator
         }
 
         // Дерево или камень занимает квадрат 5x5
-        bool Free(int i, bool[] blocked, bool[] occupied)
+        bool Free(int i)
         {
             int x = i % sx, z = i / sx;
             for (int dz = -2; dz <= 2; dz++)
@@ -1210,7 +1430,7 @@ public static class ArenaLayoutGenerator
             return true;
         }
 
-        void Mark(int i, bool[] occupied)
+        void Mark(int i)
         {
             int x = i % sx, z = i / sx;
             for (int dz = -2; dz <= 2; dz++)
@@ -1221,12 +1441,8 @@ public static class ArenaLayoutGenerator
 
         // ---------- Итог ----------
 
-        void FillLayout(ArenaLayout layout)
+        void FillLayout()
         {
-            layout.height = new int[n];
-            layout.waterTop = new int[n];
-            layout.flags = new byte[n];
-
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -1240,7 +1456,7 @@ public static class ArenaLayoutGenerator
 
                     if (border[i])
                     {
-                        layout.height[i] = height[i];
+                        outHeight[i] = height[i];
                         flags |= ArenaLayout.FlagRock;
                         if (Gentle(x, z))
                             flags |= ArenaLayout.FlagSoftTop;
@@ -1248,17 +1464,17 @@ public static class ArenaLayoutGenerator
                     else if (water[i])
                     {
                         // Дно на 3 блока ниже берега, вода на блок ниже берега
-                        int ground = levelHeights[level[i]];
-                        layout.height[i] = ground - 3;
-                        layout.waterTop[i] = ground - 1;
+                        int ground = LevelHeight(level[i]);
+                        outHeight[i] = ground - 3;
+                        outWaterTop[i] = ground - 1;
                         flags |= ArenaLayout.FlagSand;
                     }
                     else
                     {
-                        layout.height[i] = height[i];
+                        outHeight[i] = height[i];
                     }
 
-                    layout.flags[i] = flags;
+                    outFlags[i] = flags;
                 }
             }
 
@@ -1270,54 +1486,55 @@ public static class ArenaLayoutGenerator
                     int i = Idx(x, z);
                     if (water[i])
                         continue;
-                    foreach (var d in Dirs)
+                    for (int k = 0; k < 4; k++)
                     {
+                        var d = Dir(k);
                         int xx = x + d.x, zz = z + d.y;
-                        if (Inside(xx, zz) && layout.height[Idx(xx, zz)] <= layout.height[i] - 2)
-                            layout.flags[i] |= ArenaLayout.FlagCliff;
+                        if (Inside(xx, zz) && outHeight[Idx(xx, zz)] <= outHeight[i] - 2)
+                            outFlags[i] |= ArenaLayout.FlagCliff;
                     }
                 }
             }
         }
 
-        // Финальная проверка со всеми препятствиями: стены, деревья, камни, рудные бугры
-        void CheckReachability(ArenaLayout layout)
+        // Финальная проверка со всеми препятствиями: стены, деревья, камни, рудные бугры.
+        // Препятствия собираются в occupied: он уже не нужен после деревьев
+        void CheckReachability()
         {
-            var obstacles = (bool[])wallMask.Clone();
-            foreach (var cell in layout.trees)
-                MarkSquare(obstacles, cell, 2);
-            foreach (var cell in layout.rocks)
-                MarkSquare(obstacles, cell, 2);
-            foreach (var r in layout.resources)
-                MarkSquare(obstacles, r.cell, 2);
+            var obstacles = occupied;
+            obstacles.CopyFrom(wallMask);
+            for (int k = 0; k < outTrees.Length; k++)
+                MarkSquare(obstacles, outTrees[k], 2);
+            for (int k = 0; k < outRocks.Length; k++)
+                MarkSquare(obstacles, outRocks[k], 2);
+            for (int k = 0; k < outResources.Length; k++)
+                MarkSquare(obstacles, outResources[k].cell, 2);
 
-            var seen = Walk(gateOutA, obstacles, null);
+            Walk(gateOutA, obstacles, seen, false);
 
-            layout.basesConnected = NearestSeen(gateOutB, seen, 1) >= 0;
-            layout.capturePointsReachable = true;
-            foreach (var c in captures)
-                if (NearestSeen(c, seen, CaptureReachRadius) < 0)
-                    layout.capturePointsReachable = false;
+            outInfo[InfoConnected] = NearestSeen(gateOutB, seen, 1) >= 0 ? 1 : 0;
+            bool reachable = true;
+            for (int k = 0; k < captures.Length; k++)
+                if (NearestSeen(captures[k], seen, CaptureReachRadius) < 0)
+                    reachable = false;
+            outInfo[InfoCaptures] = reachable ? 1 : 0;
         }
 
-        void FillBaseZones(ArenaLayout layout)
+        void FillBaseZones()
         {
-            layout.baseZone = new byte[n];
-            layout.baseArea = new byte[n];
-
             // Сначала 3-й уровень, потом меньшие поверх: в клетке остаётся наименьший уровень
-            int[] sizes = { s.wallLevel3Size, s.wallLevel2Size, s.wallLevel1Size };
             for (int k = 0; k < 3; k++)
             {
-                int level = 3 - k;
-                int h = sizes[k] / 2;
+                int zoneLevel = 3 - k;
+                int size = k == 0 ? s.wallLevel3Size : k == 1 ? s.wallLevel2Size : s.wallLevel1Size;
+                int h = size / 2;
                 for (int dz = -h; dz < h; dz++)
                 {
                     for (int dx = -h; dx < h; dx++)
                     {
                         var cell = baseA + Rotate(new int2(dx, dz));
-                        layout.baseZone[Idx(cell)] = (byte)level;
-                        layout.baseZone[Idx(Mirror(cell))] = (byte)(4 + level);
+                        outBaseZone[Idx(cell)] = (byte)zoneLevel;
+                        outBaseZone[Idx(Mirror(cell))] = (byte)(4 + zoneLevel);
                     }
                 }
             }
@@ -1329,13 +1546,13 @@ public static class ArenaLayoutGenerator
                     var cell = baseA + new int2(dx, dz);
                     if (!Inside(cell))
                         continue;
-                    layout.baseArea[Idx(cell)] = 1;
-                    layout.baseArea[Idx(Mirror(cell))] = 2;
+                    outBaseArea[Idx(cell)] = 1;
+                    outBaseArea[Idx(Mirror(cell))] = 2;
                 }
             }
         }
 
-        void MarkSquare(bool[] mask, int2 c, int r)
+        void MarkSquare(UnsafeList<bool> mask, int2 c, int r)
         {
             for (int dz = -r; dz <= r; dz++)
                 for (int dx = -r; dx <= r; dx++)
@@ -1343,9 +1560,9 @@ public static class ArenaLayoutGenerator
                         mask[Idx(c.x + dx, c.y + dz)] = true;
         }
 
-        void Shuffle<T>(List<T> list)
+        void Shuffle<T>(ref UnsafeList<T> list) where T : unmanaged
         {
-            for (int i = list.Count - 1; i > 0; i--)
+            for (int i = list.Length - 1; i > 0; i--)
             {
                 int j = rnd.Next(i + 1);
                 (list[i], list[j]) = (list[j], list[i]);
