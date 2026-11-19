@@ -142,7 +142,7 @@ public static class ArenaLayoutGenerator
             waterOffset = waterOffset,
             forestOffset = forestOffset,
             maps = noiseMaps,
-        }.Schedule(n, 256);
+        }.Schedule((n + 1) / 2, 256);
 
         new BuildLayoutJob
         {
@@ -200,7 +200,8 @@ public static class ArenaLayoutGenerator
 
     /// <summary>
     /// Четыре карты шума на каждую клетку: x — ширина гор, y — уровни, z — вода, w — лес.
-    /// Каждая — среднее двух зеркальных точек, симметричная непрерывная функция.
+    /// Каждая — среднее двух зеркальных точек, симметричная непрерывная функция: у зеркальной клетки
+    /// (индекс n - 1 - i) значения те же, джоба считает половину карты и пишет обе клетки.
     /// Strict: без перестановок и слияния операций с float — в редакторе (Burst) и в WebGL (без Burst)
     /// пороги шума срабатывают одинаково, карта по сиду та же
     /// </summary>
@@ -210,14 +211,15 @@ public static class ArenaLayoutGenerator
         public ArenaGenSettings settings;
         public int sizeX, sizeZ;
         public float2 borderOffset, levelOffset, waterOffset, forestOffset;
-        [WriteOnly] public NativeArray<float4> maps;
+        [WriteOnly, NativeDisableParallelForRestriction] public NativeArray<float4> maps;
 
         public void Execute(int i)
         {
             int x = i % sizeX, z = i / sizeX;
             var p = new float2(x, z);
             var q = new float2(sizeX - 1 - x, sizeZ - 1 - z);
-            maps[i] = new float4(
+            // a + b == b + a точно: у зеркальной клетки p и q меняются местами, сумма та же
+            maps[i] = maps[maps.Length - 1 - i] = new float4(
                 Symmetric(p, q, settings.borderNoiseScale, 3, borderOffset),
                 Symmetric(p, q, settings.levelNoiseScale, 3, levelOffset),
                 Symmetric(p, q, settings.waterNoiseScale, 2, waterOffset),
@@ -277,7 +279,9 @@ public static class ArenaLayoutGenerator
 
         UnsafeList<int> level, edge, mountainDepth, height, comp, parent, queue, previous;
         UnsafeList<bool> border, baseMask, reserved, water, shore, rampMask, wallMask, corridor;
-        UnsafeList<bool> land, captureReach, seen, cliff, blocked, occupied;
+        UnsafeList<bool> land, captureReach, seen, cliff, blocked, occupied, walkable;
+        // Промежуточный проход по строкам для окон вокруг клетки (сглаживание, вода, проходимость)
+        UnsafeList<int> rows;
         UnsafeList<int> compSize, compCell;
         UnsafeList<int2> captures;
         UnsafeList<RampCell> cellsA, cellsB;
@@ -315,7 +319,8 @@ public static class ArenaLayoutGenerator
             border = Cells<bool>(n); baseMask = Cells<bool>(n); reserved = Cells<bool>(n); water = Cells<bool>(n);
             shore = Cells<bool>(n); rampMask = Cells<bool>(n); wallMask = Cells<bool>(n); corridor = Cells<bool>(n);
             land = Cells<bool>(n); captureReach = Cells<bool>(n); seen = Cells<bool>(n); cliff = Cells<bool>(n);
-            blocked = Cells<bool>(n); occupied = Cells<bool>(n);
+            blocked = Cells<bool>(n); occupied = Cells<bool>(n); walkable = Cells<bool>(n);
+            rows = Cells<int>(n);
             compSize = new UnsafeList<int>(64, Allocator.Persistent);
             compCell = new UnsafeList<int>(64, Allocator.Persistent);
             captures = new UnsafeList<int2>(8, Allocator.Persistent);
@@ -329,7 +334,7 @@ public static class ArenaLayoutGenerator
             border.Dispose(); baseMask.Dispose(); reserved.Dispose(); water.Dispose();
             shore.Dispose(); rampMask.Dispose(); wallMask.Dispose(); corridor.Dispose();
             land.Dispose(); captureReach.Dispose(); seen.Dispose(); cliff.Dispose();
-            blocked.Dispose(); occupied.Dispose();
+            blocked.Dispose(); occupied.Dispose(); walkable.Dispose(); rows.Dispose();
             compSize.Dispose(); compCell.Dispose(); captures.Dispose(); cellsA.Dispose(); cellsB.Dispose();
         }
 
@@ -472,9 +477,12 @@ public static class ArenaLayoutGenerator
             for (int i = 0; i < n; i++)
                 if (!border[i])
                     inner.Add(noiseMaps[i].y);
-            inner.Sort();
-            float t1 = inner[math.clamp((int)(inner.Length * s.lowShare), 0, inner.Length - 1)];
-            float t2 = inner[math.clamp((int)(inner.Length * (1f - s.highShare)), 0, inner.Length - 1)];
+            // Нужны только два значения отсортированного списка: выбор k-го без полной сортировки
+            int k1 = math.clamp((int)(inner.Length * s.lowShare), 0, inner.Length - 1);
+            int k2 = math.clamp((int)(inner.Length * (1f - s.highShare)), 0, inner.Length - 1);
+            float t1 = SelectKth(ref inner, 0, inner.Length - 1, k1);
+            // После выбора k1 всё правее не меньше: k2 ищется там, если он не левее
+            float t2 = k2 >= k1 ? SelectKth(ref inner, k1, inner.Length - 1, k2) : SelectKth(ref inner, 0, k1, k2);
             inner.Dispose();
 
             for (int i = 0; i < n; i++)
@@ -496,6 +504,38 @@ public static class ArenaLayoutGenerator
             ForceLevels();
         }
 
+        /// <summary>
+        /// k-е по возрастанию значение среди a[lo..hi] (быстрый выбор Хоара). Переставляет элементы:
+        /// после него левее k не больше a[k], правее — не меньше
+        /// </summary>
+        static float SelectKth(ref UnsafeList<float> a, int lo, int hi, int k)
+        {
+            while (lo < hi)
+            {
+                float pivot = a[(lo + hi) >> 1];
+                int i = lo, j = hi;
+                while (i <= j)
+                {
+                    while (a[i] < pivot) i++;
+                    while (a[j] > pivot) j--;
+                    if (i <= j)
+                    {
+                        (a[i], a[j]) = (a[j], a[i]);
+                        i++;
+                        j--;
+                    }
+                }
+                // a[lo..j] <= pivot, a[i..hi] >= pivot, между ними — сам pivot
+                if (k <= j)
+                    hi = j;
+                else if (k >= i)
+                    lo = i;
+                else
+                    return a[k];
+            }
+            return a[k];
+        }
+
         void ForceLevels()
         {
             for (int i = 0; i < n; i++)
@@ -509,30 +549,48 @@ public static class ArenaLayoutGenerator
 
         // ---------- 2. Сглаживание: самый частый уровень в окне 5x5 ----------
 
+        // Счётчики уровней упакованы по байту на уровень (в окне не больше 25 клеток):
+        // окно 5x5 считается суммой по строке, затем суммой строк по столбцу
         void SmoothLevels()
         {
             var next = new UnsafeList<int>(n, Allocator.Persistent);
             next.Resize(n);
+            // Локальные копии: запись в списки не может задеть их, Burst не перечитывает поля джобы в цикле
+            int w = sx, d = sz;
+            var packedRows = rows;
             for (int iteration = 0; iteration < 3; iteration++)
             {
-                next.CopyFrom(level);
-                for (int z = 0; z < sz; z++)
+                var current = level;
+                next.CopyFrom(current);
+                for (int z = 0; z < d; z++)
                 {
-                    for (int x = 0; x < sx; x++)
+                    int row = z * w;
+                    for (int x = 0; x < w; x++)
                     {
-                        int3 counts = 0;
-                        for (int dz = -2; dz <= 2; dz++)
-                            for (int dx = -2; dx <= 2; dx++)
-                                if (Inside(x + dx, z + dz))
-                                    counts[level[Idx(x + dx, z + dz)]]++;
+                        int packed = 0;
+                        for (int dx = math.max(-2, -x); dx <= math.min(2, w - 1 - x); dx++)
+                            packed += 1 << (8 * current[row + x + dx]);
+                        packedRows[row + x] = packed;
+                    }
+                }
 
-                        int current = level[Idx(x, z)];
+                for (int z = 0; z < d; z++)
+                {
+                    int from = math.max(-2, -z), to = math.min(2, d - 1 - z);
+                    for (int x = 0; x < w; x++)
+                    {
+                        int i = z * w + x;
+                        int packed = 0;
+                        for (int dz = from; dz <= to; dz++)
+                            packed += packedRows[i + dz * w];
+                        var counts = new int3(packed & 0xFF, (packed >> 8) & 0xFF, packed >> 16);
+
                         int best = math.cmax(counts);
-                        if (counts[current] == best)
+                        if (counts[current[i]] == best)
                             continue;
 
                         // При равенстве — меньший уровень (правило одно для обеих половин карты)
-                        next[Idx(x, z)] = counts.x == best ? 0 : counts.y == best ? 1 : 2;
+                        next[i] = counts.x == best ? 0 : counts.y == best ? 1 : 2;
                     }
                 }
                 (level, next) = (next, level);
@@ -543,46 +601,74 @@ public static class ArenaLayoutGenerator
 
         // ---------- Участки ----------
 
-        // valid.IsCreated == false — все клетки
+        /// <summary>
+        /// Участки — связные по 4 соседям клетки одного уровня (useValid — только клетки valid, остальные -1).
+        /// Номер участка — по порядку его первой клетки при обходе карты построчно, compCell — эта клетка.
+        /// Два прохода по строкам с объединением множеств (queue — родитель клетки, корень множества —
+        /// его наименьший индекс): без обхода в ширину и деления индекса на x и z на каждую клетку
+        /// </summary>
         void BuildComponents(UnsafeList<bool> valid, bool useValid)
         {
-            for (int i = 0; i < n; i++)
-                comp[i] = -1;
+            var root = queue;
+            for (int z = 0, i = 0; z < sz; z++)
+            {
+                for (int x = 0; x < sx; x++, i++)
+                {
+                    root[i] = i;
+                    if (useValid && !valid[i])
+                        continue;
+                    int key = level[i];
+                    if (x > 0 && level[i - 1] == key && (!useValid || valid[i - 1]))
+                        Join(i - 1, i);
+                    if (z > 0 && level[i - sx] == key && (!useValid || valid[i - sx]))
+                        Join(i - sx, i);
+                }
+            }
+
             compSize.Clear();
             compCell.Clear();
-
-            for (int start = 0; start < n; start++)
+            for (int i = 0; i < n; i++)
             {
-                if (comp[start] >= 0 || (useValid && !valid[start]))
-                    continue;
-
-                int id = compSize.Length;
-                int key = level[start];
-                int head = 0, tail = 0;
-                queue[tail++] = start;
-                comp[start] = id;
-
-                while (head < tail)
+                if (useValid && !valid[i])
                 {
-                    int i = queue[head++];
-                    int x = i % sx, z = i / sx;
-                    for (int k = 0; k < 4; k++)
-                    {
-                        var d = Dir(k);
-                        int xx = x + d.x, zz = z + d.y;
-                        if (!Inside(xx, zz))
-                            continue;
-                        int j = Idx(xx, zz);
-                        if (comp[j] >= 0 || level[j] != key || (useValid && !valid[j]))
-                            continue;
-                        comp[j] = id;
-                        queue[tail++] = j;
-                    }
+                    comp[i] = -1;
+                    continue;
                 }
 
-                compSize.Add(tail);
-                compCell.Add(start);
+                // Корень множества лежит раньше клетки, его номер уже известен
+                int r = FindRoot(i);
+                if (r == i)
+                {
+                    comp[i] = compSize.Length;
+                    compSize.Add(0);
+                    compCell.Add(i);
+                }
+                else
+                {
+                    comp[i] = comp[r];
+                }
+                compSize[comp[i]]++;
             }
+        }
+
+        int FindRoot(int i)
+        {
+            while (queue[i] != i)
+            {
+                queue[i] = queue[queue[i]];
+                i = queue[i];
+            }
+            return i;
+        }
+
+        // Корень объединения — меньший из двух
+        void Join(int a, int b)
+        {
+            int ra = FindRoot(a), rb = FindRoot(b);
+            if (ra < rb)
+                queue[rb] = ra;
+            else if (rb < ra)
+                queue[ra] = rb;
         }
 
         // По участку: сколько соседних клеток каждого уровня; best — самый частый уровень, при равенстве меньший
@@ -785,6 +871,18 @@ public static class ArenaLayoutGenerator
         {
             float threshold = s.waterThreshold + waterBonus;
 
+            // Вокруг 7x7 — только низина без резерва: rows — строка 7 по x внутри карты целиком такая
+            for (int z = 0; z < sz; z++)
+            {
+                for (int x = 0; x < sx; x++)
+                {
+                    bool ok = x >= 3 && x < sx - 3;
+                    for (int dx = -3; dx <= 3 && ok; dx++)
+                        ok = level[Idx(x + dx, z)] == 0 && !reserved[Idx(x + dx, z)];
+                    rows[Idx(x, z)] = ok ? 1 : 0;
+                }
+            }
+
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -793,16 +891,9 @@ public static class ArenaLayoutGenerator
                     if (level[i] != 0 || noiseMaps[i].z < threshold)
                         continue;
 
-                    // Вокруг 7x7 — только низина без резерва
-                    bool ok = true;
+                    bool ok = z >= 3 && z < sz - 3;
                     for (int dz = -3; dz <= 3 && ok; dz++)
-                    {
-                        for (int dx = -3; dx <= 3 && ok; dx++)
-                        {
-                            int xx = x + dx, zz = z + dz;
-                            ok = Inside(xx, zz) && level[Idx(xx, zz)] == 0 && !reserved[Idx(xx, zz)];
-                        }
-                    }
+                        ok = rows[Idx(x, z + dz)] != 0;
                     water[i] = ok;
                 }
             }
@@ -813,16 +904,29 @@ public static class ArenaLayoutGenerator
                 if (water[i] && compSize[comp[i]] < s.minLakeCells)
                     water[i] = false;
 
+            // Берег — суша, у которой в окне 5x5 есть вода: сначала вода в строке по x, затем по столбцу
+            for (int z = 0; z < sz; z++)
+            {
+                for (int x = 0; x < sx; x++)
+                {
+                    bool any = false;
+                    for (int dx = math.max(-2, -x); dx <= math.min(2, sx - 1 - x) && !any; dx++)
+                        any = water[Idx(x + dx, z)];
+                    rows[Idx(x, z)] = any ? 1 : 0;
+                }
+            }
+
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
                 {
                     if (water[Idx(x, z)])
                         continue;
-                    for (int dz = -2; dz <= 2; dz++)
-                        for (int dx = -2; dx <= 2; dx++)
-                            if (Inside(x + dx, z + dz) && water[Idx(x + dx, z + dz)])
-                                shore[Idx(x, z)] = true;
+                    bool any = false;
+                    for (int dz = math.max(-2, -z); dz <= math.min(2, sz - 1 - z) && !any; dz++)
+                        any = rows[Idx(x, z + dz)] != 0;
+                    if (any)
+                        shore[Idx(x, z)] = true;
                 }
             }
         }
@@ -1132,6 +1236,7 @@ public static class ArenaLayoutGenerator
                 for (int i = 0; i < n; i++)
                     previous[i] = -1;
             MarkCliffs();
+            MarkWalkable(obstacles);
 
             int head = 0, tail = 0;
             int s0 = Idx(start);
@@ -1149,7 +1254,7 @@ public static class ArenaLayoutGenerator
                     if (!Inside(xx, zz))
                         continue;
                     int j = Idx(xx, zz);
-                    if (reached[j] || math.abs(height[j] - height[i]) > 1 || !Walkable(xx, zz, obstacles))
+                    if (reached[j] || math.abs(height[j] - height[i]) > 1 || !walkable[j])
                         continue;
                     reached[j] = true;
                     if (withPrevious)
@@ -1177,21 +1282,35 @@ public static class ArenaLayoutGenerator
             }
         }
 
-        bool Walkable(int x, int z, UnsafeList<bool> obstacles)
+        // Клетка проходима, если квадрат ClearanceRadius вокруг неё целиком на карте и в нём нет воды, гор,
+        // препятствий и обрывов. Считается для всей карты один раз на обход: сначала строка по x, затем столбец
+        void MarkWalkable(UnsafeList<bool> obstacles)
         {
-            for (int dz = -ClearanceRadius; dz <= ClearanceRadius; dz++)
+            const int r = ClearanceRadius;
+            for (int z = 0; z < sz; z++)
             {
-                for (int dx = -ClearanceRadius; dx <= ClearanceRadius; dx++)
+                for (int x = 0; x < sx; x++)
                 {
-                    int xx = x + dx, zz = z + dz;
-                    if (!Inside(xx, zz))
-                        return false;
-                    int j = Idx(xx, zz);
-                    if (water[j] || border[j] || obstacles[j] || cliff[j])
-                        return false;
+                    bool ok = x >= r && x < sx - r;
+                    for (int dx = -r; dx <= r && ok; dx++)
+                    {
+                        int j = Idx(x + dx, z);
+                        ok = !(water[j] || border[j] || obstacles[j] || cliff[j]);
+                    }
+                    rows[Idx(x, z)] = ok ? 1 : 0;
                 }
             }
-            return true;
+
+            for (int z = 0; z < sz; z++)
+            {
+                for (int x = 0; x < sx; x++)
+                {
+                    bool ok = z >= r && z < sz - r;
+                    for (int dz = -r; dz <= r && ok; dz++)
+                        ok = rows[Idx(x, z + dz)] != 0;
+                    walkable[Idx(x, z)] = ok;
+                }
+            }
         }
 
         // Ближайшая к цели клетка, до которой дошёл обход (центр точки захвата занят бугром)

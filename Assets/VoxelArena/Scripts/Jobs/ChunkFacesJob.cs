@@ -26,27 +26,57 @@ public struct ChunkFacesJob : IJobParallelFor
         int3 origin = chunkOrigins[index];
         bool hasLand = false, hasWater = false, hasAir = false, hasWaterAround = false;
 
-        for (int y = -1; y <= chunkSize; y++)
+        // Кайма по x за краем арены — воздух
+        if (origin.x == 0 || origin.x + chunkSize >= dims.x)
+            hasAir = true;
+        int x0 = math.max(origin.x - 1, 0);
+        int x1 = math.min(origin.x + chunkSize, dims.x - 1);
+
+        for (int ly = -1; ly <= chunkSize; ly++)
         {
-            for (int z = -1; z <= chunkSize; z++)
+            int y = origin.y + ly;
+            // Ниже арены — порода, не суша чанка; выше — воздух
+            if (y < 0)
+                continue;
+            if (y >= dims.y)
             {
-                for (int x = -1; x <= chunkSize; x++)
+                hasAir = true;
+                continue;
+            }
+
+            for (int lz = -1; lz <= chunkSize; lz++)
+            {
+                int z = origin.z + lz;
+                if (z < 0 || z >= dims.z)
                 {
-                    byte block = GetBlock(origin + new int3(x, y, z));
-                    bool inside = x >= 0 && y >= 0 && z >= 0 && x < chunkSize && y < chunkSize && z < chunkSize;
+                    hasAir = true;
+                    continue;
+                }
+
+                bool insideRow = ly >= 0 && ly < chunkSize && lz >= 0 && lz < chunkSize;
+                int row = (y * dims.z + z) * dims.x;
+                for (int x = x0; x <= x1; x++)
+                {
+                    byte block = voxels[row + x];
+                    bool inside = insideRow && x >= origin.x && x < origin.x + chunkSize;
 
                     if (block == VoxelBlocks.Air)
                         hasAir = true;
                     else if (block == VoxelBlocks.Water)
                     {
                         hasWaterAround = true;
-                        if (inside)
-                            hasWater = true;
+                        hasWater |= inside;
                     }
-                    else if (inside)
-                        hasLand = true;
+                    else
+                        hasLand |= inside;
                 }
+
+                // Оба меша уже точно нужны: дальше смотреть незачем
+                if (hasLand && hasWater && hasAir)
+                    break;
             }
+            if (hasLand && hasWater && hasAir)
+                break;
         }
 
         byte result = 0;
@@ -56,16 +86,5 @@ public struct ChunkFacesJob : IJobParallelFor
         if (hasWater && hasAir)
             result |= WaterFaces;
         faces[index] = result;
-    }
-
-    byte GetBlock(int3 p)
-    {
-        if (p.y < 0)
-            return VoxelBlocks.Bedrock;
-
-        if (p.x < 0 || p.z < 0 || p.x >= dims.x || p.y >= dims.y || p.z >= dims.z)
-            return VoxelBlocks.Air;
-
-        return voxels[(p.y * dims.z + p.z) * dims.x + p.x];
     }
 }

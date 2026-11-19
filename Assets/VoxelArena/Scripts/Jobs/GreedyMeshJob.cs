@@ -25,6 +25,40 @@ public struct ChunkMeshTask
 }
 
 /// <summary>
+/// Рабочие списки GreedyMesher одного потока. Живут всё время арены и переиспользуются задачами:
+/// без выделения памяти на каждую задачу
+/// </summary>
+public struct GreedyMeshScratch
+{
+    public UnsafeList<byte> blocks;
+    public UnsafeList<int> mask;
+    public UnsafeList<float3> positions;
+    public UnsafeList<float3> normals;
+    public UnsafeList<Color32> colors;
+    public UnsafeList<uint> indices;
+
+    public static NativeArray<GreedyMeshScratch> Create(Allocator allocator) =>
+        new(Unity.Jobs.LowLevel.Unsafe.JobsUtility.ThreadIndexCount, allocator);
+
+    public static void Dispose(NativeArray<GreedyMeshScratch> scratch)
+    {
+        foreach (var s in scratch)
+        {
+            // Списки потока создаются при первой его задаче
+            if (!s.blocks.IsCreated)
+                continue;
+            s.blocks.Dispose();
+            s.mask.Dispose();
+            s.positions.Dispose();
+            s.normals.Dispose();
+            s.colors.Dispose();
+            s.indices.Dispose();
+        }
+        scratch.Dispose();
+    }
+}
+
+/// <summary>
 /// Строит меши пачки чанков и пишет их прямо в Mesh.MeshDataArray: в главном потоке остаётся
 /// только Mesh.ApplyAndDisposeWritableMeshData. Задача index пишет в meshes[index].
 /// Чанки без видимых граней сюда не попадают: их отсеивает ChunkFacesJob.
@@ -44,33 +78,56 @@ public struct GreedyMeshJob : IJobParallelFor
     [ReadOnly] public NativeArray<VertexAttributeDescriptor> shapeLayout;
     public Mesh.MeshDataArray meshes;
 
+    // Списки по номеру потока: задачи одного потока идут друг за другом
+    [NativeDisableParallelForRestriction] public NativeArray<GreedyMeshScratch> scratch;
+    [NativeSetThreadIndex] int threadIndex;
+
     public void Execute(int index)
     {
         var task = tasks[index];
         bool plain = task.kind == ChunkMeshKind.Shape;
 
-        // Списки живут одну задачу и сразу освобождаются: временная память задач не копится
-        // за кадр, даже когда все джобы идут в главном потоке (WebGL)
+        var lists = scratch[threadIndex];
+        if (!lists.blocks.IsCreated)
+        {
+            int padded = chunkSize + 2;
+            lists.blocks = new UnsafeList<byte>(padded * padded * padded, Allocator.Persistent);
+            lists.mask = new UnsafeList<int>(chunkSize * chunkSize, Allocator.Persistent);
+            lists.positions = new UnsafeList<float3>(1024, Allocator.Persistent);
+            lists.normals = new UnsafeList<float3>(1024, Allocator.Persistent);
+            lists.colors = new UnsafeList<Color32>(1024, Allocator.Persistent);
+            lists.indices = new UnsafeList<uint>(1536, Allocator.Persistent);
+        }
+        lists.positions.Clear();
+        lists.normals.Clear();
+        lists.colors.Clear();
+        lists.indices.Clear();
+
         var mesher = new GreedyMesher
         {
-            voxels = voxels,
             faceColors = faceColors,
-            dims = dims,
             chunkSize = chunkSize,
-            chunkOrigin = task.origin,
             water = task.kind == ChunkMeshKind.Water,
             plain = plain,
-            mask = new UnsafeList<int>(chunkSize * chunkSize, Allocator.Persistent),
-            positions = new UnsafeList<float3>(1024, Allocator.Persistent),
-            normals = new UnsafeList<float3>(plain ? 0 : 1024, Allocator.Persistent),
-            colors = new UnsafeList<Color32>(plain ? 0 : 1024, Allocator.Persistent),
-            indices = new UnsafeList<uint>(1536, Allocator.Persistent),
+            blocks = lists.blocks,
+            mask = lists.mask,
+            positions = lists.positions,
+            normals = lists.normals,
+            colors = lists.colors,
+            indices = lists.indices,
         };
-        mesher.mask.Resize(chunkSize * chunkSize);
-
+        mesher.CopyBlocks(voxels, dims, task.origin);
         mesher.Build();
         Write(meshes[index], ref mesher, plain);
-        mesher.Dispose();
+
+        // Списки могли вырасти и переехать: поток забирает их обратно
+        lists.blocks = mesher.blocks;
+        lists.mask = mesher.mask;
+        lists.positions = mesher.positions;
+        lists.normals = mesher.normals;
+        lists.colors = mesher.colors;
+        lists.indices = mesher.indices;
+        scratch[threadIndex] = lists;
     }
 
     void Write(Mesh.MeshData data, ref GreedyMesher mesher, bool plain)
@@ -118,15 +175,15 @@ public struct GreedyMeshJob : IJobParallelFor
 /// </summary>
 struct GreedyMesher
 {
-    public NativeArray<byte> voxels;
     public NativeArray<byte> faceColors;
-    public int3 dims;
-    public int3 chunkOrigin;
     public int chunkSize;
     // false — меш суши (всё, кроме воды), true — меш воды
     public bool water;
     public bool plain;
 
+    // Блоки чанка с каймой в один воксель со всех сторон: (chunkSize + 2)³, индекс от угла каймы.
+    // Грани и затенение читают только отсюда — без проверок границ арены на каждый воксель
+    public UnsafeList<byte> blocks;
     public UnsafeList<int> mask;
     public UnsafeList<float3> positions;
     public UnsafeList<float3> normals;
@@ -134,13 +191,41 @@ struct GreedyMesher
     public UnsafeList<Color32> colors;
     public UnsafeList<uint> indices;
 
-    public void Dispose()
+    int padded;
+
+    /// <summary>
+    /// Копирует блоки чанка с каймой. Ниже арены — сплошная порода (нижние грани не строятся),
+    /// за краями и выше — воздух (края карты видны как срез)
+    /// </summary>
+    public void CopyBlocks(NativeArray<byte> voxels, int3 dims, int3 origin)
     {
-        mask.Dispose();
-        positions.Dispose();
-        normals.Dispose();
-        colors.Dispose();
-        indices.Dispose();
+        padded = chunkSize + 2;
+        blocks.Resize(padded * padded * padded);
+        mask.Resize(chunkSize * chunkSize);
+
+        int k = 0;
+        for (int ly = 0; ly < padded; ly++)
+        {
+            int y = origin.y + ly - 1;
+            for (int lz = 0; lz < padded; lz++)
+            {
+                int z = origin.z + lz - 1;
+                if (y < 0 || y >= dims.y || z < 0 || z >= dims.z)
+                {
+                    byte fill = y < 0 ? VoxelBlocks.Bedrock : VoxelBlocks.Air;
+                    for (int lx = 0; lx < padded; lx++)
+                        blocks[k++] = fill;
+                    continue;
+                }
+
+                int row = (y * dims.z + z) * dims.x;
+                for (int lx = 0; lx < padded; lx++)
+                {
+                    int x = origin.x + lx - 1;
+                    blocks[k++] = x >= 0 && x < dims.x ? voxels[row + x] : VoxelBlocks.Air;
+                }
+            }
+        }
     }
 
     public void Build()
@@ -169,21 +254,25 @@ struct GreedyMesher
     // Ключ грани: бит 0 — грань есть, биты 1-8 — цвет, биты 9-16 — AO четырёх углов
     void BuildMask(int3 ed, int3 eu, int3 ev, int dir, int face, int s)
     {
+        // Шаги по осям в индексе blocks
+        int stepD = Step(ed), stepU = Step(eu), stepV = Step(ev);
+        int next = stepD * dir;
+
         for (int j = 0; j < chunkSize; j++)
         {
-            for (int i = 0; i < chunkSize; i++)
+            int p = Index(ed * s + ev * j);
+            for (int i = 0; i < chunkSize; i++, p += stepU)
             {
-                int3 p = chunkOrigin + ed * s + eu * i + ev * j;
                 int key = 0;
 
-                byte block = GetBlock(p);
+                byte block = blocks[p];
                 bool isWater = block == VoxelBlocks.Water;
                 if (block != VoxelBlocks.Air && isWater == water)
                 {
                     // Суша видна сквозь воду, вода — только на границе с воздухом
-                    int3 q = p + ed * dir;
-                    byte next = GetBlock(q);
-                    bool visible = next == VoxelBlocks.Air || (!water && next == VoxelBlocks.Water);
+                    int q = p + next;
+                    byte nextBlock = blocks[q];
+                    bool visible = nextBlock == VoxelBlocks.Air || (!water && nextBlock == VoxelBlocks.Water);
                     if (visible && plain)
                     {
                         key = 1;
@@ -194,10 +283,10 @@ struct GreedyMesher
                         int ao0 = 3, ao1 = 3, ao2 = 3, ao3 = 3;
                         if (!water)
                         {
-                            ao0 = Ao(q, eu, ev, -1, -1);
-                            ao1 = Ao(q, eu, ev, 1, -1);
-                            ao2 = Ao(q, eu, ev, 1, 1);
-                            ao3 = Ao(q, eu, ev, -1, 1);
+                            ao0 = Ao(q, -stepU, -stepV);
+                            ao1 = Ao(q, stepU, -stepV);
+                            ao2 = Ao(q, stepU, stepV);
+                            ao3 = Ao(q, -stepU, stepV);
                         }
                         key = 1 | (color << 1) | (ao0 << 9) | (ao1 << 11) | (ao2 << 13) | (ao3 << 15);
                     }
@@ -302,11 +391,12 @@ struct GreedyMesher
     }
 
     // Затенение угла: 3 — открыт, 0 — зажат с двух сторон. Вода не затеняет.
-    int Ao(int3 q, int3 eu, int3 ev, int su, int sv)
+    // q — индекс вокселя перед гранью, du / dv — шаги в blocks к соседям вдоль граней
+    int Ao(int q, int du, int dv)
     {
-        int side1 = IsOpaque(GetBlock(q + eu * su)) ? 1 : 0;
-        int side2 = IsOpaque(GetBlock(q + ev * sv)) ? 1 : 0;
-        int corner = IsOpaque(GetBlock(q + eu * su + ev * sv)) ? 1 : 0;
+        int side1 = IsOpaque(blocks[q + du]) ? 1 : 0;
+        int side2 = IsOpaque(blocks[q + dv]) ? 1 : 0;
+        int corner = IsOpaque(blocks[q + du + dv]) ? 1 : 0;
 
         if (side1 == 1 && side2 == 1)
             return 0;
@@ -316,18 +406,10 @@ struct GreedyMesher
 
     static bool IsOpaque(byte block) => block != VoxelBlocks.Air && block != VoxelBlocks.Water;
 
-    // Ниже арены — сплошная порода (нижние грани не строятся),
-    // за краями и выше — воздух (края карты видны как срез)
-    byte GetBlock(int3 p)
-    {
-        if (p.y < 0)
-            return VoxelBlocks.Bedrock;
+    // Индекс в blocks вокселя чанка (координаты от начала чанка, от -1 до chunkSize)
+    int Index(int3 p) => ((p.y + 1) * padded + p.z + 1) * padded + p.x + 1;
 
-        if (p.x < 0 || p.z < 0 || p.x >= dims.x || p.y >= dims.y || p.z >= dims.z)
-            return VoxelBlocks.Air;
-
-        return voxels[(p.y * dims.z + p.z) * dims.x + p.x];
-    }
+    int Step(int3 axis) => (axis.y * padded + axis.z) * padded + axis.x;
 
     static int3 Axis(int d)
     {

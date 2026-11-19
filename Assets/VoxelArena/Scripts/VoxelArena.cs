@@ -140,6 +140,8 @@ public class VoxelArena : MonoBehaviour
         public readonly int[] landTask = new int[ChunkBatch];
         public readonly int[] waterTask = new int[ChunkBatch];
         public readonly int[] shapeTask = new int[ChunkBatch];
+        // Была ли у чанка суша до перестройки: от этого зависит, трогать ли его коллайдер
+        public readonly bool[] hadLand = new bool[ChunkBatch];
         // Меши задач по порядку: в них Mesh.ApplyAndDisposeWritableMeshData кладёт данные
         public readonly List<Mesh> meshes = new(ChunkBatch * 3);
         public NativeList<ChunkMeshTask> tasks;
@@ -154,6 +156,8 @@ public class VoxelArena : MonoBehaviour
     // форма — только позиция. Каждый атрибут в своём потоке: джоба копирует их отдельно
     NativeArray<VertexAttributeDescriptor> colorLayout;
     NativeArray<VertexAttributeDescriptor> shapeLayout;
+    // Рабочие списки GreedyMeshJob по потокам
+    NativeArray<GreedyMeshScratch> meshScratch;
 
     int3 dims;
     int3 chunkCounts;
@@ -171,6 +175,8 @@ public class VoxelArena : MonoBehaviour
     readonly List<Node> dirtyNodes = new();
     readonly List<CombineInstance> combineLand = new();
     readonly List<CombineInstance> combineWater = new();
+    // Массивы для Mesh.CombineMeshes по числу частей (от 0 до NodeChunks³): без нового массива на каждый узел
+    readonly CombineInstance[][] combineArrays = new CombineInstance[NodeChunks * NodeChunks * NodeChunks + 1][];
 
     readonly Stopwatch timer = new();
     readonly Stopwatch generateTimer = new();
@@ -193,6 +199,7 @@ public class VoxelArena : MonoBehaviour
         {
             new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, 0),
         }, Allocator.Persistent);
+        meshScratch = GreedyMeshScratch.Create(Allocator.Persistent);
 
         paletteTexture = VoxelBlocks.CreatePaletteTexture();
         Shader.SetGlobalTexture(PaletteTexId, paletteTexture);
@@ -229,6 +236,7 @@ public class VoxelArena : MonoBehaviour
         faceColors.Dispose();
         colorLayout.Dispose();
         shapeLayout.Dispose();
+        GreedyMeshScratch.Dispose(meshScratch);
         // null — объект уничтожен до Start, раскладки ещё не было
         Layout?.Dispose();
 
@@ -691,12 +699,14 @@ public class VoxelArena : MonoBehaviour
         node.dirty = false;
     }
 
-    static bool CombineInto(Mesh mesh, List<CombineInstance> parts)
+    bool CombineInto(Mesh mesh, List<CombineInstance> parts)
     {
         mesh.Clear();
         if (parts.Count == 0)
             return false;
-        mesh.CombineMeshes(parts.ToArray(), true, true);
+        var array = combineArrays[parts.Count] ??= new CombineInstance[parts.Count];
+        parts.CopyTo(array);
+        mesh.CombineMeshes(array, true, true);
         // Границы задаём явно: по ним Unity решает, виден ли узел камере
         float size = NodeChunks * ChunkSize;
         mesh.bounds = new Bounds(Vector3.one * (size * 0.5f), Vector3.one * size);
@@ -834,6 +844,7 @@ public class VoxelArena : MonoBehaviour
             colorLayout = colorLayout,
             shapeLayout = shapeLayout,
             meshes = batch.data,
+            scratch = meshScratch,
         };
 
         if (inWorkers)
@@ -859,23 +870,32 @@ public class VoxelArena : MonoBehaviour
     // Загружает готовые меши пачки в Mesh (одним Mesh.ApplyAndDisposeWritableMeshData) и MeshCollider
     void ApplyBatch(MeshBatch batch, bool inWorkers)
     {
-        var bakeMeshes = new NativeArray<EntityId>(batch.count, Allocator.TempJob);
+        // Коллайдеры заранее готовятся только в рабочих потоках: в главном это сделает сам MeshCollider
+        var bakeMeshes = inWorkers ? new NativeArray<EntityId>(batch.count, Allocator.TempJob) : default;
         int bakeCount = 0;
 
         for (int k = 0; k < batch.count; k++)
         {
             int index = dirtyChunks[batch.start + k];
             var chunk = chunks[index];
+            bool hadLand = chunk.hasLand, hadWater = chunk.hasWater;
+            batch.hadLand[k] = hadLand;
+
+            // Чанк был пустым и остался пустым (воздух над картой, порода под ней — большая часть арены
+            // при генерации): меши уже пусты, коллайдер выключен, узел перестраивать незачем
+            if (!hadLand && !hadWater && batch.landTask[k] < 0 && batch.waterTask[k] < 0)
+                continue;
 
             // Переназначение заставляет коллайдер взять новые данные
-            chunk.collider.sharedMesh = null;
+            if (hadLand)
+                chunk.collider.sharedMesh = null;
 
-            int landIndices = TaskIndexCount(batch, batch.landTask[k], chunk.land);
-            int shapeIndices = TaskIndexCount(batch, batch.shapeTask[k], chunk.shape);
-            int waterIndices = TaskIndexCount(batch, batch.waterTask[k], chunk.water);
+            int landIndices = TaskIndexCount(batch, batch.landTask[k], chunk.land, hadLand);
+            int shapeIndices = TaskIndexCount(batch, batch.shapeTask[k], chunk.shape, hadLand);
+            int waterIndices = TaskIndexCount(batch, batch.waterTask[k], chunk.water, hadWater);
             chunk.hasLand = landIndices > 0;
             chunk.hasWater = waterIndices > 0;
-            if (chunk.hasLand)
+            if (chunk.hasLand && inWorkers)
                 bakeMeshes[bakeCount++] = chunk.shape.GetEntityId();
 
             var node = NodeOfChunk(index);
@@ -903,29 +923,37 @@ public class VoxelArena : MonoBehaviour
 
         // Данные PhysX для коллайдеров готовятся во всех рабочих потоках: назначенный меш коллайдер
         // берёт уже готовым. Без этого он готовил бы их сам в главном потоке, чанк за чанком
-        if (inWorkers && bakeCount > 0)
+        if (inWorkers)
         {
-            new BakeColliderJob { meshes = bakeMeshes, options = ColliderCooking }
-                .Schedule(bakeCount, 4)
-                .Complete();
+            if (bakeCount > 0)
+            {
+                new BakeColliderJob { meshes = bakeMeshes, options = ColliderCooking }
+                    .Schedule(bakeCount, 4)
+                    .Complete();
+            }
+            bakeMeshes.Dispose();
         }
-        bakeMeshes.Dispose();
 
         for (int k = 0; k < batch.count; k++)
         {
             var chunk = chunks[dirtyChunks[batch.start + k]];
+            // Без суши до и после коллайдер так и остаётся выключенным и без меша
+            if (!chunk.hasLand && !batch.hadLand[k])
+                continue;
             chunk.collider.enabled = chunk.hasLand;
             if (chunk.hasLand)
                 chunk.collider.sharedMesh = chunk.shape;
         }
     }
 
-    // Число индексов меша задачи; task < 0 — задачи нет (у чанка нет граней этого меша), меш очищается
-    static int TaskIndexCount(MeshBatch batch, int task, Mesh mesh)
+    // Число индексов меша задачи; task < 0 — задачи нет (у чанка нет граней этого меша),
+    // меш очищается, если в нём что-то было
+    static int TaskIndexCount(MeshBatch batch, int task, Mesh mesh, bool hadMesh)
     {
         if (task < 0)
         {
-            mesh.Clear();
+            if (hadMesh)
+                mesh.Clear();
             return 0;
         }
         return batch.data[task].GetSubMesh(0).indexCount;
