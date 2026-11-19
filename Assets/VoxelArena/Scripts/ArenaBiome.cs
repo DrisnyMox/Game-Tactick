@@ -7,6 +7,8 @@ public enum ArenaBiome
     Autumn,
     Winter,
     Desert,
+    // Тропики: остров вылазки (Бирюзовые Пределы)
+    Tropic,
 }
 
 public enum ArenaBiomeChoice
@@ -16,6 +18,7 @@ public enum ArenaBiomeChoice
     Autumn,
     Winter,
     Desert,
+    Tropic,
 }
 
 /// <summary>
@@ -38,18 +41,26 @@ public static class ArenaBiomes
         ArenaBiome.Summer => "лето",
         ArenaBiome.Autumn => "осень",
         ArenaBiome.Winter => "зима",
+        ArenaBiome.Tropic => "тропики",
         _ => "пустыня",
     };
 
     /// <summary>С какой высоты вершины гор под снегом</summary>
     public static int SnowLine(ArenaBiome biome, int highHeight) =>
-        biome == ArenaBiome.Winter ? highHeight + 3 : highHeight + 15;
+        biome switch
+        {
+            ArenaBiome.Winter => highHeight + 3,
+            // В тропиках снега нет
+            ArenaBiome.Tropic => int.MaxValue / 4,
+            _ => highHeight + 15,
+        };
 
     public static Color FogColor(ArenaBiome biome) => biome switch
     {
         ArenaBiome.Summer => new Color32(170, 200, 226, 255),
         ArenaBiome.Autumn => new Color32(200, 186, 162, 255),
         ArenaBiome.Winter => new Color32(212, 222, 234, 255),
+        ArenaBiome.Tropic => new Color32(190, 222, 230, 255),
         _ => new Color32(226, 206, 170, 255),
     };
 
@@ -73,6 +84,9 @@ public static class ArenaBiomes
         p[SlotMetal] = new Color32(118, 124, 132, 255);
         p[SlotWallTop] = new Color32(152, 148, 142, 255);
         p[SlotWallSide] = new Color32(122, 118, 112, 255);
+        p[SlotRustTop] = new Color32(156, 84, 46, 255);
+        p[SlotRustSide] = new Color32(124, 64, 38, 255);
+        p[SlotTech] = new Color32(70, 200, 214, 255);
 
         switch (biome)
         {
@@ -115,6 +129,22 @@ public static class ArenaBiomes
                 p[SlotLeavesAlt] = new Color32(50, 100, 70, 255);
                 p[SlotWallTop] = new Color32(172, 178, 188, 255);
                 p[SlotWallSide] = new Color32(138, 144, 156, 255);
+                break;
+
+            case ArenaBiome.Tropic:
+                p[SlotStoneTop] = new Color32(166, 160, 148, 255);
+                p[SlotStoneSide] = new Color32(140, 134, 122, 255);
+                p[SlotDirt] = new Color32(122, 90, 62, 255);
+                p[SlotGrassTop] = new Color32(86, 170, 64, 255);
+                p[SlotSand] = new Color32(240, 226, 182, 255);
+                p[SlotWater] = new Color32(38, 186, 196, 255);
+                p[SlotWoodSide] = new Color32(132, 100, 66, 255);
+                p[SlotWoodTop] = new Color32(168, 132, 90, 255);
+                p[SlotLeaves] = new Color32(52, 150, 60, 255);
+                p[SlotLeavesAlt] = new Color32(96, 178, 58, 255);
+                // Бетон руин
+                p[SlotWallTop] = new Color32(176, 174, 166, 255);
+                p[SlotWallSide] = new Color32(148, 146, 138, 255);
                 break;
 
             default: // Desert

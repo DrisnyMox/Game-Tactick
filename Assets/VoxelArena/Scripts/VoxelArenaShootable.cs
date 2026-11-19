@@ -13,10 +13,27 @@ public class VoxelArenaShootable : MonoBehaviour, IShootable
     [SerializeField] float craterRadiusInVoxels = 1.3f;
 
     VoxelArena arena;
+    // Чей выстрел сейчас выбивает воксели: VoxelArena.Explode зовёт VoxelsRemoved внутри себя
+    Backpack miner;
 
     void Awake()
     {
         arena = GetComponent<VoxelArena>();
+        arena.VoxelsRemoved += Arena_VoxelsRemoved;
+    }
+
+    void OnDestroy()
+    {
+        arena.VoxelsRemoved -= Arena_VoxelsRemoved;
+    }
+
+    // Выбитые пулей воксели — материалы в рюкзак стрелка
+    void Arena_VoxelsRemoved(Vector3 center, System.Collections.Generic.List<VoxelArena.RemovedVoxel> removed)
+    {
+        if (miner == null)
+            return;
+        foreach (var voxel in removed)
+            miner.Mine(voxel.block);
     }
 
     public HitSurface SurfaceAt(RaycastHit hit)
@@ -42,7 +59,9 @@ public class VoxelArenaShootable : MonoBehaviour, IShootable
     {
         // Центр чуть внутри поверхности, чтобы пуля выбивала грань, в которую попала, а не воздух перед ней
         var center = hit.point - hit.normal * (arena.VoxelSize * 0.5f);
+        miner = attacker.GetComponent<Backpack>();
         arena.Explode(center, craterRadiusInVoxels * arena.VoxelSize);
+        miner = null;
         return false;
     }
 }

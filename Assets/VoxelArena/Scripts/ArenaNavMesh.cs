@@ -388,7 +388,8 @@ public class ArenaNavMesh : MonoBehaviour
                     int chunk = (cy * chunksZ + cz) * chunksX + cx;
                     if (landMeshes[chunk] != null)
                         sources.Add(Source(landMeshes[chunk], chunkMatrices[chunk], 0));
-                    if (waterMeshes[chunk] != null)
+                    // Мелководье архипелага проходимо: по дну ходят и боты
+                    if (waterMeshes[chunk] != null && !arena.Layout.wadeableWater)
                         sources.Add(Source(waterMeshes[chunk], chunkMatrices[chunk], NotWalkableArea));
                 }
 

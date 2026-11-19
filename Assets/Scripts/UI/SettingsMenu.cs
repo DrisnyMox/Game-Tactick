@@ -65,7 +65,8 @@ public class SettingsMenu : MonoBehaviour
             return;
         if (IsOpen)
             Close();
-        else if (!ArenaLoadingScreen.IsShown)
+        // Под окном базы или итогом вылазки меню не открывается: они сами держат ввод игрока
+        else if (!ArenaLoadingScreen.IsShown && !LoopGui.ModalOpen && LoopGui.ClosedFrame != Time.frameCount)
             Open();
     }
 

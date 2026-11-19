@@ -11,6 +11,7 @@ using UnityEngine;
 public static class VoxelArenaSetup
 {
     const string MaterialPath = "Assets/VoxelArena/VoxelArena.mat";
+    const string WaterMaterialPath = "Assets/VoxelArena/VoxelWater.mat";
 
     [MenuItem("Tools/Voxel Arena/Create Test Setup")]
     static void CreateTestSetup()
@@ -34,25 +35,34 @@ public static class VoxelArenaSetup
             return false;
         }
 
-        var material = AssetDatabase.LoadAssetAtPath<Material>(MaterialPath);
-        if (material == null)
-        {
-            var shader = Shader.Find("NoobGenerals/VoxelArena");
-            if (shader == null)
-            {
-                Debug.LogError("Не найден шейдер NoobGenerals/VoxelArena: проверьте, что Assets/VoxelArena/Shaders/VoxelArena.shader скомпилировался без ошибок.");
-                return false;
-            }
-
-            material = new Material(shader);
-            AssetDatabase.CreateAsset(material, MaterialPath);
-        }
+        if (!LoadOrCreateMaterial(MaterialPath, "NoobGenerals/VoxelArena", out var material) ||
+            !LoadOrCreateMaterial(WaterMaterialPath, "NoobGenerals/VoxelWater", out var waterMaterial))
+            return false;
 
         var arenaObject = new GameObject("Voxel Arena");
         arena = arenaObject.AddComponent<VoxelArena>();
         SetReference(arena, "material", material);
+        SetReference(arena, "waterMaterial", waterMaterial);
         arenaObject.AddComponent<ArenaNavMesh>();
         Undo.RegisterCreatedObjectUndo(arenaObject, "Create Voxel Arena");
+        return true;
+    }
+
+    static bool LoadOrCreateMaterial(string path, string shaderName, out Material material)
+    {
+        material = AssetDatabase.LoadAssetAtPath<Material>(path);
+        if (material != null)
+            return true;
+
+        var shader = Shader.Find(shaderName);
+        if (shader == null)
+        {
+            Debug.LogError($"Не найден шейдер {shaderName}: проверьте, что шейдеры в Assets/VoxelArena/Shaders скомпилировались без ошибок.");
+            return false;
+        }
+
+        material = new Material(shader);
+        AssetDatabase.CreateAsset(material, path);
         return true;
     }
 

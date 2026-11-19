@@ -28,7 +28,10 @@ public static class VoxelBlocks
     public const byte TeamOneDark = 17;
     public const byte TeamTwoDark = 18;
     public const byte Metal = 19;
-    public const int Count = 20;
+    // Остров вылазки: ржавое железо остовов и руин, электроника старого мира
+    public const byte Rust = 20;
+    public const byte Tech = 21;
+    public const int Count = 22;
 
     public const int FaceTop = 0;
     public const int FaceSide = 1;
@@ -52,6 +55,9 @@ public static class VoxelBlocks
     public const byte SlotWallTop = 15;
     public const byte SlotWallSide = 16;
     public const byte SlotMarker = 17;
+    public const byte SlotRustTop = 18;
+    public const byte SlotRustSide = 19;
+    public const byte SlotTech = 20;
     public const byte SlotTeamOne = 32;
     public const byte SlotTeamTwo = 33;
     public const byte SlotTeamOneDark = 34;
@@ -82,6 +88,8 @@ public static class VoxelBlocks
         { SlotTeamOneDark, SlotTeamOneDark, SlotTeamOneDark },  // TeamOneDark
         { SlotTeamTwoDark, SlotTeamTwoDark, SlotTeamTwoDark },  // TeamTwoDark
         { SlotMetal, SlotMetal, SlotMetal },                // Metal
+        { SlotRustTop, SlotRustSide, SlotRustSide },        // Rust
+        { SlotTech, SlotTech, SlotTech },                   // Tech
     };
 
     public static byte TeamColor(int team) => team == 0 ? TeamOne : TeamTwo;

@@ -9,6 +9,12 @@ public enum ResourceKind
 {
     /// <summary>Точка захвата с ценным ресурсом в поле (внутри стен источников нет)</summary>
     CapturePoint,
+    /// <summary>Остров: причал с лодкой на берегу (высадка и эвакуация)</summary>
+    Landing,
+    /// <summary>Остров: руины дома старого мира — бетон, железо, электроника</summary>
+    Ruin,
+    /// <summary>Остров: ржавый остов корабля на пляже</summary>
+    Wreck,
 }
 
 public struct ResourcePoint
@@ -17,6 +23,8 @@ public struct ResourcePoint
     public ResourceKind kind;
     /// <summary>0 — база один, 1 — база два, -1 — ничья (точка захвата)</summary>
     public int team;
+    /// <summary>Остров: шаг клетки в сторону моря (причал и остов смотрят в море)</summary>
+    public int2 facing;
 }
 
 public struct WallCell
@@ -70,6 +78,12 @@ public sealed class ArenaLayout : IDisposable
     public int flattenedRegions;
     public bool basesConnected;
     public bool capturePointsReachable;
+    /// <summary>Остров: вода стоит до этой высоты (клетки раскладки); 0 — карта без моря</summary>
+    public int seaLevel;
+    /// <summary>На сколько вокселей вода ниже верха клетки waterTop: на острове 1, чтобы глубина была 1–3 вокселя, а не 2–4</summary>
+    public int waterDropVoxels;
+    /// <summary>По воде можно ходить (мелководье архипелага): NavMesh не помечает воду непроходимой</summary>
+    public bool wadeableWater;
 
     public ArenaLayout(int sizeX, int sizeZ)
     {
@@ -113,7 +127,7 @@ public sealed class ArenaLayout : IDisposable
 public static class ArenaLayoutGenerator
 {
     // Выход джобы, который не помещается в ArenaLayout напрямую
-    const int InfoBaseAx = 0, InfoBaseAz = 1, InfoBaseBx = 2, InfoBaseBz = 3, InfoGateSide = 4,
+    internal const int InfoBaseAx = 0, InfoBaseAz = 1, InfoBaseBx = 2, InfoBaseBz = 3, InfoGateSide = 4,
               InfoRegions = 5, InfoRamps = 6, InfoFlattened = 7, InfoConnected = 8, InfoCaptures = 9, InfoCount = 10;
 
     /// <summary>Раскладка, джобы которой запущены: Finish ждёт их и отдаёт готовую раскладку</summary>
@@ -156,6 +170,9 @@ public static class ArenaLayoutGenerator
     /// </summary>
     public static Pending Schedule(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ)
     {
+        if (settings.shape == ArenaShape.Island)
+            return IslandLayout.Schedule(settings, sizeX, sizeY, sizeZ);
+
         var layout = new ArenaLayout(sizeX, sizeZ);
         int n = sizeX * sizeZ;
 

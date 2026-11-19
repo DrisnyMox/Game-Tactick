@@ -4,6 +4,13 @@ using UnityEngine;
 /// <summary>
 /// Настройки генерации арены. Размеры и высоты — в вокселях (клетках).
 /// </summary>
+/// <summary>Какую карту строит генератор. Новое поле: у сцен со старыми настройками оно 0 — арена</summary>
+public enum ArenaShape
+{
+    Arena,
+    Island,
+}
+
 [Serializable]
 public struct ArenaGenSettings
 {
@@ -14,6 +21,8 @@ public struct ArenaGenSettings
     [HideInInspector] public int version;
     public int seed;
     public ArenaBiomeChoice biome;
+    [Tooltip("Arena — арена RTS (горы по краю, две базы со стенами), Island — остров в океане для вылазки")]
+    public ArenaShape shape;
 
     [Header("Горы по краю карты")]
     [Tooltip("Ширина гор меняется по шуму от минимума до максимума — край неровный")]

@@ -13,7 +13,7 @@ OcclusionCullingSettings:
 --- !u!104 &2
 RenderSettings:
   m_ObjectHideFlags: 0
-  serializedVersion: 9
+  serializedVersion: 10
   m_Fog: 0
   m_FogColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}
   m_FogMode: 3
@@ -42,8 +42,8 @@ RenderSettings:
 --- !u!157 &3
 LightmapSettings:
   m_ObjectHideFlags: 0
-  serializedVersion: 12
-  m_GIWorkflowMode: 1
+  serializedVersion: 13
+  m_BakeOnSceneLoad: 0
   m_GISettings:
     serializedVersion: 2
     m_BounceScale: 1
@@ -66,9 +66,6 @@ LightmapSettings:
     m_LightmapParameters: {fileID: 0}
     m_LightmapsBakeMode: 1
     m_TextureCompression: 1
-    m_FinalGather: 0
-    m_FinalGatherFiltering: 1
-    m_FinalGatherRayCount: 256
     m_ReflectionCompression: 2
     m_MixedBakeMode: 2
     m_BakeBackend: 1
@@ -96,7 +93,7 @@ LightmapSettings:
     m_ExportTrainingData: 0
     m_TrainingDataDestination: TrainingData
     m_LightProbeSampleCountMultiplier: 4
-  m_LightingDataAsset: {fileID: 0}
+  m_LightingDataAsset: {fileID: 20201, guid: 0000000000000000f000000000000000, type: 0}
   m_LightingSettings: {fileID: 0}
 --- !u!196 &4
 NavMeshSettings:
@@ -173,6 +170,9 @@ MonoBehaviour:
   agentTypeID: 0
   navCellsPerVoxel: 3
   stepHeightInVoxels: 1.05
+  regionChunks: 2
+  vehicleRadius: 1.1
+  vehicleHeight: 1.8
 --- !u!114 &105674103
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -186,27 +186,45 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   material: {fileID: 2100000, guid: 9db67250b1c65c44db4336812fdc30d5, type: 2}
+  waterMaterial: {fileID: 2100000, guid: 9edf65ef94568254eb1a56833352c6c5, type: 2}
   sizeX: 400
   sizeY: 48
   sizeZ: 400
   voxelSize: 0.5
+  cellVoxels: 1
   generation:
+    version: 10
     seed: 1
-    groundLevel: 6
-    hillHeight: 16
-    terraceCount: 4
-    noiseScale: 0.02
-    octaves: 3
-    rampScale: 0.04
-    rampThreshold: 0.3
-    roadWidth: 3
-    roadAmplitude: 20
-    roadWaves: 1
-    baseMargin: 16
-    baseRadius: 12
-    baseFalloff: 10
-    baseHeight: 10
-    sandLevel: 6
+    biome: 4
+    borderMinWidth: 8
+    borderMaxWidth: 44
+    borderNoiseScale: 0.022
+    mountainRise: 12
+    mountainHeight: 20
+    lowHeight: 6
+    midHeight: 10
+    highHeight: 15
+    lowShare: 0.33
+    highShare: 0.24
+    levelNoiseScale: 0.02
+    minRegionCells: 90
+    wallLevel1Size: 44
+    wallLevel2Size: 52
+    wallLevel3Size: 60
+    wallThickness: 2
+    wallHeight: 4
+    gateWidth: 10
+    basePadding: 4
+    baseBackSpace: 50
+    rampWidth: 10
+    extraRampChance: 0.35
+    waterNoiseScale: 0.03
+    waterThreshold: 0.12
+    minLakeCells: 25
+    forestNoiseScale: 0.05
+    forestThreshold: 0.18
+    forestDensity: 0.55
+    rockChance: 0.012
 --- !u!4 &105674104
 Transform:
   m_ObjectHideFlags: 0
@@ -252,17 +270,23 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 474bcb49853aa07438625e644c072ee6, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  m_Version: 3
   m_UsePipelineSettings: 1
   m_AdditionalLightsShadowResolutionTier: 2
-  m_LightLayerMask: 1
-  m_RenderingLayers: 1
   m_CustomShadowLayers: 0
-  m_ShadowLayerMask: 1
-  m_ShadowRenderingLayers: 1
   m_LightCookieSize: {x: 1, y: 1}
   m_LightCookieOffset: {x: 0, y: 0}
   m_SoftShadowQuality: 0
+  m_RenderingLayersMask:
+    serializedVersion: 0
+    m_Bits: 1
+  m_ShadowRenderingLayersMask:
+    serializedVersion: 0
+    m_Bits: 1
+  m_Version: 4
+  m_LightLayerMask: 1
+  m_ShadowLayerMask: 1
+  m_RenderingLayers: 1
+  m_ShadowRenderingLayers: 1
 --- !u!108 &203844588
 Light:
   m_ObjectHideFlags: 0
@@ -271,15 +295,14 @@ Light:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 203844586}
   m_Enabled: 1
-  serializedVersion: 10
+  serializedVersion: 13
   m_Type: 1
-  m_Shape: 0
   m_Color: {r: 1, g: 0.95686275, b: 0.8392157, a: 1}
   m_Intensity: 1
   m_Range: 10
   m_SpotAngle: 30
   m_InnerSpotAngle: 21.80208
-  m_CookieSize: 10
+  m_CookieSize2D: {x: 10, y: 10}
   m_Shadows:
     m_Type: 2
     m_Resolution: -1
@@ -323,8 +346,12 @@ Light:
   m_BoundingSphereOverride: {x: 0, y: 0, z: 0, w: 0}
   m_UseBoundingSphereOverride: 0
   m_UseViewFrustumForShadowCasterCull: 1
-  m_ShadowRadius: 0
+  m_ForceVisible: 0
+  m_ShapeRadius: 0
   m_ShadowAngle: 0
+  m_LightUnit: 1
+  m_LuxAtDistance: 1
+  m_EnableSpotReflector: 1
 --- !u!4 &203844589
 Transform:
   m_ObjectHideFlags: 0
@@ -395,7 +422,6 @@ MonoBehaviour:
   m_ScreenCoordScaleBias: {x: 0, y: 0, z: 0, w: 0}
   m_RequiresDepthTexture: 0
   m_RequiresColorTexture: 0
-  m_Version: 2
   m_TaaSettings:
     m_Quality: 3
     m_FrameInfluence: 0.1
@@ -403,6 +429,7 @@ MonoBehaviour:
     m_MipBias: 0
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
+  m_Version: 2
 --- !u!81 &961739751
 AudioListener:
   m_ObjectHideFlags: 0

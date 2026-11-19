@@ -2058,6 +2058,7 @@ GameObject:
   - component: {fileID: 6027162469209523079}
   - component: {fileID: 442947496309624678}
   - component: {fileID: 5883635562427296351}
+  - component: {fileID: 7781584955266196869}
   m_Layer: 8
   m_Name: PlayerSurvivor
   m_TagString: Player
@@ -2377,6 +2378,9 @@ MonoBehaviour:
   decalPrefab: {fileID: 183892, guid: adcc07c1b4d949244958f04e8b4afad7, type: 3}
   impactLifetime: 2
   decalLifetime: 20
+  crosshairGap: 6
+  crosshairSize: 14
+  crosshairThickness: 3
   hitMarkerClip: {fileID: 8300000, guid: 73459b1cb505e2547abb704557230ce0, type: 3}
   headshotMarkerClip: {fileID: 8300000, guid: c7cb403c9ede3864f95d7b6c8917f026, type: 3}
   killMarkerClip: {fileID: 8300000, guid: d5dc7a8fe85cceb4da6486e1aa744dd8, type: 3}
@@ -2411,6 +2415,21 @@ MonoBehaviour:
   maxHealth: 100
   headMultiplier: 2
   deathImpulse: 8
+--- !u!114 &7781584955266196869
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6039154663972180722}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8029f2de7b291cc47bf7b7e5d50373a6, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Backpack
+  capacity: 120
+  medkitHeal: 60
+  medkitCooldown: 2
 --- !u!1 &6169901924289589089
 GameObject:
   m_ObjectHideFlags: 0

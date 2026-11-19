@@ -51,6 +51,23 @@ public class ShooterBot : MonoBehaviour
     [Tooltip("От союзников ближе этого, м, бот отходит")]
     [SerializeField] float separation = 2.5f;
 
+    [Header("Рейдер (вылазка)")]
+    [Tooltip("Рейдер: добывает ресурсы, подбирает мешки и ящики, уходит через точку эвакуации. " +
+             "В бой вступает, только когда видит врага или в него попали. Нужен RaidDirector в сцене")]
+    [SerializeField] bool raider;
+    [Tooltip("С какого расстояния рейдер стреляет по дереву, камню или руде, м")]
+    [SerializeField] float gatherDistance = 6f;
+    [Tooltip("Сколько секунд рейдер добывает в одном месте, прежде чем искать другое")]
+    [SerializeField] float gatherSpotTime = 25f;
+    [Tooltip("Набрал столько материалов — идёт на эвакуацию")]
+    [SerializeField] int extractAtMaterials = 40;
+    [Tooltip("Через столько секунд на карте идёт на эвакуацию, даже если набрал мало")]
+    [SerializeField] float extractAfter = 300f;
+    [Tooltip("С какого расстояния рейдер замечает мешок или ящик, м")]
+    [SerializeField] float pickupNoticeDistance = 30f;
+    [Tooltip("Сколько секунд рейдер отвечает огнём тому, кто в него попал, даже не видя его")]
+    [SerializeField] float grudgeTime = 8f;
+
     SurvivorShooter shooter;
     StarterAssetsInputs input;
     CharacterController controller;
@@ -78,12 +95,35 @@ public class ShooterBot : MonoBehaviour
     float stuckTime;
     float noiseSeed;
 
+    // Рейдер
+    Backpack backpack;
+    float raidStart;
+    int gatherSpot = -1;
+    float gatherSpotUntil;
+    Vector3 gatherPoint;
+    float nextGatherCheck;
+    float gatherBurstEnd, gatherPause;
+
+    public bool Raider => raider;
+
+    /// <summary>Рейдер набрал добычи или пробыл на карте долго: идёт на эвакуацию, и точка эвакуации его выпустит</summary>
+    public bool WantsExtract => raider &&
+        (backpack.MaterialCount >= extractAtMaterials || backpack.IsFull || Time.time - raidStart > extractAfter);
+
+    /// <summary>Рейдер вышел на карту: отсчёт до эвакуации заново, место добычи не выбрано</summary>
+    public void BeginRaid()
+    {
+        raidStart = Time.time;
+        gatherSpot = -1;
+    }
+
     void Awake()
     {
         shooter = GetComponent<SurvivorShooter>();
         input = GetComponent<StarterAssetsInputs>();
         controller = GetComponent<CharacterController>();
         self = GetComponent<CharacterHealth>();
+        backpack = GetComponent<Backpack>();
         ownColliders = GetComponentsInChildren<Collider>(true);
         noiseSeed = Random.value * 100f;
         path = new NavMeshPath();
@@ -111,9 +151,15 @@ public class ShooterBot : MonoBehaviour
     {
         if (Time.time >= nextTargetCheck || target == null || target.IsDead)
             ChooseTarget();
+        // Ранен и давно не попадали — аптечка
+        if (raider && self.Health < self.MaxHealth * 0.5f && Time.time - self.LastHitTime > 2f)
+            backpack.UseMedkit();
         if (target == null)
         {
-            Stop();
+            if (raider)
+                Roam();
+            else
+                Stop();
             return;
         }
 
@@ -202,7 +248,16 @@ public class ShooterBot : MonoBehaviour
             }
         }
 
-        var next = seen != null ? seen : target != null && !target.IsDead ? target : nearest;
+        CharacterHealth next;
+        if (!raider)
+            next = seen != null ? seen : target != null && !target.IsDead ? target : nearest;
+        else if (seen != null)
+            next = seen;
+        // Рейдер не ищет врагов по всей карте: держит цель, пока помнит, где видел, или отвечает тому, кто попал
+        else if (target != null && !target.IsDead && Time.time - lastSeenTime <= chaseMemory)
+            next = target;
+        else
+            next = Grudge();
         if (next == target)
             return;
         target = next;
@@ -225,6 +280,101 @@ public class ShooterBot : MonoBehaviour
                 push += away / d * (1f - d / separation);
         }
         return push;
+    }
+
+    // Враг, который недавно попал в рейдера; null — никто
+    CharacterHealth Grudge()
+    {
+        var attacker = self.LastAttacker;
+        if (attacker == null || attacker.IsDead || attacker.Team == self.Team || Time.time - self.LastHitTime > grudgeTime)
+            return null;
+        return attacker;
+    }
+
+    // Рейдер без цели: набрал добычи — идёт на ближайшую эвакуацию, видит мешок или ящик — идёт к нему,
+    // иначе добывает: подходит к дереву, камню или руде на gatherDistance и стреляет в них
+    void Roam()
+    {
+        shooter.FireInput = false;
+        shooter.AimInput = false;
+        var director = RaidDirector.Current;
+        Vector3 goal;
+
+        if (WantsExtract)
+            goal = director.NearestExtraction(transform.position);
+        else if (NearestPickup(out var pickup))
+            goal = pickup;
+        else
+        {
+            if (gatherSpot < 0 || Time.time >= gatherSpotUntil)
+                ChooseGatherSpot(director);
+            if (gatherSpot >= 0 && Time.time >= nextGatherCheck)
+            {
+                // Добыл всё в этом месте — к другому
+                nextGatherCheck = Time.time + 0.5f;
+                if (!director.GatherTarget(gatherSpot, out gatherPoint))
+                {
+                    director.RemoveGatherSpot(gatherSpot);
+                    gatherSpot = -1;
+                }
+            }
+            if (gatherSpot < 0)
+            {
+                Stop();
+                return;
+            }
+
+            if (Flat(gatherPoint - transform.position).magnitude <= gatherDistance)
+            {
+                input.move = Vector2.zero;
+                input.sprint = false;
+                hasPath = false;
+                shooter.AimTarget = gatherPoint;
+                shooter.AimInput = true;
+                // Очередями, как в бою: сплошной огонь выбивал материалы слишком быстро
+                if (Time.time >= gatherBurstEnd + gatherPause)
+                {
+                    gatherBurstEnd = Time.time + Random.Range(burstTime.x, burstTime.y);
+                    gatherPause = Random.Range(burstPause.x, burstPause.y) * 2f;
+                }
+                shooter.FireInput = Time.time < gatherBurstEnd;
+                return;
+            }
+            goal = gatherPoint;
+        }
+
+        var move = FollowPath(goal).normalized + Separation();
+        input.sprint = Flat(goal - transform.position).magnitude > 12f;
+        SetMove(move);
+        UpdateStuck(move);
+    }
+
+    // Место добычи: случайное из нескольких ближайших
+    void ChooseGatherSpot(RaidDirector director)
+    {
+        gatherSpot = director.RandomNearGatherSpot(transform.position);
+        gatherSpotUntil = Time.time + gatherSpotTime;
+        nextGatherCheck = 0f;
+    }
+
+    bool NearestPickup(out Vector3 position)
+    {
+        position = default;
+        float best = pickupNoticeDistance;
+        bool found = false;
+        if (backpack.IsFull)
+            return false;
+        foreach (var pickup in Pickup.All)
+        {
+            float d = Vector3.Distance(transform.position, pickup.transform.position);
+            if (d < best)
+            {
+                best = d;
+                position = pickup.transform.position;
+                found = true;
+            }
+        }
+        return found;
     }
 
     void Stop()

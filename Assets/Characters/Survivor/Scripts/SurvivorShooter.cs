@@ -152,6 +152,21 @@ public class SurvivorShooter : MonoBehaviour
     bool markerKill;
 
     public int Ammo => ammo;
+    /// <summary>
+    /// Запас патронов для перезарядки (рюкзак игрока на вылазке). null — запас бесконечный, как у ботов
+    /// и в бою на арене
+    /// </summary>
+    public IAmmoReserve Reserve { get; set; }
+    /// <summary>Сколько патронов в магазине (большой магазин — больше). Новый размер — магазин полный</summary>
+    public int MagazineSize
+    {
+        get => magazineSize;
+        set
+        {
+            magazineSize = value;
+            Refill();
+        }
+    }
     public bool Reloading => reloadEndTime >= 0f;
     public bool BotControlled => botControlled;
     /// <summary>Точка у глаз персонажа: из неё целится бот</summary>
@@ -222,12 +237,13 @@ public class SurvivorShooter : MonoBehaviour
         if (Reloading && Time.time >= reloadEndTime)
         {
             reloadEndTime = -1f;
-            ammo = magazineSize;
+            int need = magazineSize - ammo;
+            ammo += Reserve == null ? need : Reserve.TakeAmmo(need);
         }
         if (ReloadInput)
         {
             ReloadInput = false;
-            if (!Reloading && ammo < magazineSize)
+            if (!Reloading && ammo < magazineSize && HasReserve)
                 StartReload();
         }
 
@@ -267,7 +283,8 @@ public class SurvivorShooter : MonoBehaviour
             else
             {
                 weapon.PlayEmpty();
-                StartReload();
+                if (HasReserve)
+                    StartReload();
             }
         }
 
@@ -356,6 +373,15 @@ public class SurvivorShooter : MonoBehaviour
         ammo = magazineSize;
         reloadEndTime = -1f;
     }
+
+    /// <summary>Сколько патронов в магазине сейчас (первый магазин вылазки берётся из рюкзака)</summary>
+    public void SetLoaded(int count)
+    {
+        ammo = Mathf.Clamp(count, 0, magazineSize);
+        reloadEndTime = -1f;
+    }
+
+    bool HasReserve => Reserve == null || Reserve.Reserve > 0;
 
     void StartReload()
     {
@@ -597,7 +623,7 @@ public class SurvivorShooter : MonoBehaviour
     // и строка здоровья собираются заново, только когда меняется число
     GUIStyle hudStyle, arrowStyle;
     string ammoText, healthText;
-    int shownAmmo = -1, shownHealth = -1;
+    int shownAmmo = -1, shownReserve = -1, shownHealth = -1;
 
     void OnGUI()
     {
@@ -627,10 +653,13 @@ public class SurvivorShooter : MonoBehaviour
         DrawHitMarker();
         DrawDamageArrow();
 
-        if (ammo != shownAmmo)
+        // Справа от магазина — запас в рюкзаке, а без запаса — размер магазина
+        int reserve = Reserve == null ? magazineSize : Reserve.Reserve;
+        if (ammo != shownAmmo || reserve != shownReserve)
         {
             shownAmmo = ammo;
-            ammoText = $"{ammo} / {magazineSize}";
+            shownReserve = reserve;
+            ammoText = $"{ammo} / {reserve}";
         }
         int hp = Mathf.CeilToInt(health.Health);
         if (hp != shownHealth)

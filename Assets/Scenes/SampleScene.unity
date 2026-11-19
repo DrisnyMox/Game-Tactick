@@ -3866,7 +3866,7 @@ MonoBehaviour:
     m_FontStyle: 0
     m_BestFit: 0
     m_MinSize: 10
-    m_MaxSize: 40
+    m_MaxSize: 52
     m_Alignment: 4
     m_AlignByGeometry: 0
     m_RichText: 1
@@ -4325,6 +4325,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoxelArena
   material: {fileID: 2100000, guid: 9db67250b1c65c44db4336812fdc30d5, type: 2}
+  waterMaterial: {fileID: 2100000, guid: 9edf65ef94568254eb1a56833352c6c5, type: 2}
   sizeX: 800
   sizeY: 96
   sizeZ: 800

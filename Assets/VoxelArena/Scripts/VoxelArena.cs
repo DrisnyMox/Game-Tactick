@@ -14,13 +14,14 @@ using Debug = UnityEngine.Debug;
 /// <summary>
 /// Воксельная арена фиксированного размера. Все воксели лежат в одном массиве,
 /// чанки 16³ нужны для мешей и коллайдеров, рисуются склеенные узлы из NodeChunks³ чанков. Арена не должна быть повёрнута.
-/// У каждого чанка три меша: суша и вода для отрисовки и форма суши (без цвета и затенения,
-/// грани склеены крупно) — для MeshCollider и NavMesh.
+/// У каждого чанка три меша: меш отрисовки с двумя сабмешами (0 — суша, материал material; 1 — вода,
+/// материал waterMaterial), форма суши (без цвета и затенения, грани склеены крупно) — для MeshCollider
+/// и NavMesh, и форма воды — по ней NavMesh отмечает воду непроходимой.
 /// </summary>
 public class VoxelArena : MonoBehaviour
 {
     public const int ChunkSize = 16;
-    // Узел отрисовки — куб NodeChunks³ чанков с одним мешем суши и одним мешем воды на всех.
+    // Узел отрисовки — куб NodeChunks³ чанков с одним мешем на всех (два сабмеша: суша и вода).
     // После правки вокселей перестраивается чанк 16³ (дёшево), а узел склеивается из готовых мешей
     // чанков. Рисуются узлы, а не чанки: отрисовок на кадр в NodeChunks³ раз меньше
     public const int NodeChunks = 2;
@@ -29,6 +30,8 @@ public class VoxelArena : MonoBehaviour
     static readonly int VoxelSizeId = Shader.PropertyToID("_VoxelSize");
 
     [SerializeField] Material material;
+    [Tooltip("Материал воды: второй сабмеш мешей чанков и узлов")]
+    [SerializeField] Material waterMaterial;
     [SerializeField] int sizeX = 400;
     [SerializeField] int sizeY = 48;
     [SerializeField] int sizeZ = 400;
@@ -38,7 +41,7 @@ public class VoxelArena : MonoBehaviour
     [SerializeField] int cellVoxels = 1;
     [SerializeField] ArenaGenSettings generation = ArenaGenSettings.Default;
 
-    /// <summary>Меши чанка изменились: форма суши, вода (null — пусто), матрица чанка.</summary>
+    /// <summary>Меши чанка изменились: форма суши, форма воды (null — пусто), матрица чанка.</summary>
     public event Action<int, Mesh, Mesh, Matrix4x4> ChunkMeshChanged;
     public event Action Generated;
     /// <summary>Началась генерация новой карты: до Generated воксели и меши чанков заняты ею</summary>
@@ -67,6 +70,7 @@ public class VoxelArena : MonoBehaviour
 
     public int3 Dims => dims;
     public Material Material => material;
+    public Material WaterMaterial => waterMaterial;
     public int ChunkTotal => chunks.Length;
     public float VoxelSize => voxelSize;
     public int CellVoxels => cellVoxels;
@@ -120,9 +124,10 @@ public class VoxelArena : MonoBehaviour
     class Chunk
     {
         public GameObject root;
-        public Mesh land;
-        public Mesh water;
+        // Меш отрисовки: сабмеш 0 — суша, 1 — вода. Чанк его не рисует: его склеивает в себя узел
+        public Mesh mesh;
         public Mesh shape;
+        public Mesh waterShape;
         public bool hasLand;
         public bool hasWater;
         public MeshCollider collider;
@@ -134,22 +139,21 @@ public class VoxelArena : MonoBehaviour
     class Node
     {
         public int3 firstChunk;
-        public Mesh land;
-        public Mesh water;
-        public MeshRenderer landRenderer;
-        public MeshRenderer waterRenderer;
+        // Сабмеш 0 — суша, 1 — вода
+        public Mesh mesh;
+        public MeshRenderer renderer;
         public bool dirty;
     }
 
     /// <summary>
     /// Меши одной пачки чанков: задачи GreedyMeshJob и Mesh.MeshDataArray, в которую джоба их пишет.
-    /// landTask / waterTask / shapeTask — номер задачи меша чанка в пачке, -1 — у чанка нет граней этого меша
+    /// colorTask / shapeTask / waterShapeTask — номер задачи меша чанка в пачке, -1 — у чанка нет граней этого меша
     /// </summary>
     sealed class MeshBatch
     {
-        public readonly int[] landTask = new int[ChunkBatch];
-        public readonly int[] waterTask = new int[ChunkBatch];
+        public readonly int[] colorTask = new int[ChunkBatch];
         public readonly int[] shapeTask = new int[ChunkBatch];
+        public readonly int[] waterShapeTask = new int[ChunkBatch];
         // Была ли у чанка суша до перестройки: от этого зависит, трогать ли его коллайдер
         public readonly bool[] hadLand = new bool[ChunkBatch];
         // Меши задач по порядку: в них Mesh.ApplyAndDisposeWritableMeshData кладёт данные
@@ -164,8 +168,8 @@ public class VoxelArena : MonoBehaviour
 
     // Две пачки: пока одна загружается в Unity, рабочие потоки строят меши другой
     readonly MeshBatch[] meshBatches = { new(), new() };
-    // Раскладка вершин: суша и вода — позиция, нормаль, цвет (r — индекс палитры, g — затенение);
-    // форма — только позиция. Каждый атрибут в своём потоке: джоба копирует их отдельно
+    // Раскладка вершин: меши отрисовки чанков и узлов — позиция, нормаль, цвет (r — индекс палитры,
+    // g — затенение); формы — только позиция. Каждый атрибут в своём потоке: джобы копируют их отдельно
     NativeArray<VertexAttributeDescriptor> colorLayout;
     NativeArray<VertexAttributeDescriptor> shapeLayout;
     // Рабочие списки GreedyMeshJob по потокам
@@ -185,13 +189,17 @@ public class VoxelArena : MonoBehaviour
     int3 nodeCounts;
     Node[] nodes;
     readonly List<Node> dirtyNodes = new();
-    readonly List<CombineInstance> combineLand = new();
-    readonly List<CombineInstance> combineWater = new();
-    // Массивы для Mesh.CombineMeshes по числу частей (от 0 до NodeChunks³): без нового массива на каждый узел
-    readonly CombineInstance[][] combineArrays = new CombineInstance[NodeChunks * NodeChunks * NodeChunks + 1][];
+    // Материалы сабмешей узла: суша, вода
+    Material[] nodeMaterials;
+
+    // Меши чанков и узлов пачки склейки (CombineNodesJob)
+    readonly List<Mesh> combineChunkMeshes = new();
+    readonly List<Mesh> combineNodeMeshes = new();
 
     readonly Stopwatch timer = new();
     readonly Stopwatch generateTimer = new();
+    // Время с последнего отпущенного кадра при склейке узлов по кадрам
+    readonly Stopwatch frameTimer = new();
 
     // Генерация по кадрам: её джобы и их память. Если арену уничтожат посреди генерации (выход из Play Mode
     // на экране загрузки), OnDestroy дожидается джоб и освобождает память
@@ -265,15 +273,12 @@ public class VoxelArena : MonoBehaviour
 
         foreach (var chunk in chunks)
         {
-            Destroy(chunk.land);
-            Destroy(chunk.water);
+            Destroy(chunk.mesh);
             Destroy(chunk.shape);
+            Destroy(chunk.waterShape);
         }
         foreach (var node in nodes)
-        {
-            Destroy(node.land);
-            Destroy(node.water);
-        }
+            Destroy(node.mesh);
         Destroy(paletteTexture);
     }
 
@@ -360,6 +365,7 @@ public class VoxelArena : MonoBehaviour
             cellHeight = Layout.height,
             cellWaterTop = Layout.waterTop,
             cellFlags = Layout.flags,
+            waterDrop = Layout.waterDropVoxels,
             height = columnHeight,
             waterTop = genWaterTop,
             flags = genFlags,
@@ -430,6 +436,7 @@ public class VoxelArena : MonoBehaviour
         public int3 dims;
         public int cellVoxels;
         public int layoutSizeX, layoutSizeZ;
+        public int waterDrop;
         [ReadOnly] public NativeArray<int> cellHeight;
         [ReadOnly] public NativeArray<int> cellWaterTop;
         [ReadOnly] public NativeArray<byte> cellFlags;
@@ -469,7 +476,7 @@ public class VoxelArena : MonoBehaviour
             }
 
             height[column] = (int)math.floor(smooth * k + 0.5f);
-            waterTop[column] = cellWaterTop[cell] * k;
+            waterTop[column] = cellWaterTop[cell] > 0 ? cellWaterTop[cell] * k - waterDrop : 0;
             flags[column] = cellFlags[cell];
         }
     }
@@ -636,8 +643,8 @@ public class VoxelArena : MonoBehaviour
     }
 
     /// <summary>
-    /// Меши суши чанков, в которых стоят стены баз, с матрицами — чтобы при установке здания
-    /// нарисовать стены отдельно полупрозрачными.
+    /// Меши отрисовки чанков (сабмеш 0 — суша), в которых стоят стены баз, с матрицами — чтобы
+    /// при установке здания нарисовать стены отдельно полупрозрачными.
     /// </summary>
     public void CollectWallChunks(List<(Mesh mesh, Matrix4x4 matrix)> result)
     {
@@ -658,7 +665,7 @@ public class VoxelArena : MonoBehaviour
                 int index = ChunkIndex(new int3(x / ChunkSize, cy, z / ChunkSize));
                 if (!seen.Add(index) || !chunks[index].hasLand)
                     continue;
-                result.Add((chunks[index].land, chunks[index].root.transform.localToWorldMatrix));
+                result.Add((chunks[index].mesh, chunks[index].root.transform.localToWorldMatrix));
             }
         }
     }
@@ -704,17 +711,17 @@ public class VoxelArena : MonoBehaviour
             collider.sharedMesh = null;
             collider.enabled = false;
 
-            // Меши суши и воды чанк не рисует: их склеивает в себя узел
             chunks[c] = new Chunk
             {
                 root = root,
-                land = new Mesh { name = root.name },
-                water = new Mesh { name = root.name + " Water" },
+                mesh = new Mesh { name = root.name },
                 shape = new Mesh { name = root.name + " Shape" },
+                waterShape = new Mesh { name = root.name + " Water Shape" },
                 collider = collider,
             };
         }
 
+        nodeMaterials = new[] { material, waterMaterial };
         nodeCounts = (chunkCounts + NodeChunks - 1) / NodeChunks;
         nodes = new Node[nodeCounts.x * nodeCounts.y * nodeCounts.z];
         for (int n = 0; n < nodes.Length; n++)
@@ -728,31 +735,19 @@ public class VoxelArena : MonoBehaviour
             root.transform.localPosition = (Vector3)(float3)(firstChunk * ChunkSize) * voxelSize;
             root.transform.localScale = Vector3.one * voxelSize;
 
-            var land = new Mesh { name = root.name, indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
-            land.MarkDynamic();
-            root.AddComponent<MeshFilter>().sharedMesh = land;
-            var landRenderer = root.AddComponent<MeshRenderer>();
-            landRenderer.sharedMaterial = material;
-            landRenderer.enabled = false;
-
-            var waterObject = new GameObject("Water");
-            waterObject.layer = gameObject.layer;
-            waterObject.transform.SetParent(root.transform, false);
-            var water = new Mesh { name = root.name + " Water", indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
-            water.MarkDynamic();
-            waterObject.AddComponent<MeshFilter>().sharedMesh = water;
-            var waterRenderer = waterObject.AddComponent<MeshRenderer>();
-            waterRenderer.sharedMaterial = material;
-            waterRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            waterRenderer.enabled = false;
+            var mesh = new Mesh { name = root.name };
+            mesh.MarkDynamic();
+            root.AddComponent<MeshFilter>().sharedMesh = mesh;
+            // Тени отбрасывает только суша: у шейдера воды нет прохода ShadowCaster
+            var renderer = root.AddComponent<MeshRenderer>();
+            renderer.sharedMaterials = nodeMaterials;
+            renderer.enabled = false;
 
             nodes[n] = new Node
             {
                 firstChunk = firstChunk,
-                land = land,
-                water = water,
-                landRenderer = landRenderer,
-                waterRenderer = waterRenderer,
+                mesh = mesh,
+                renderer = renderer,
             };
         }
     }
@@ -763,48 +758,76 @@ public class VoxelArena : MonoBehaviour
         return nodes[(n.y * nodeCounts.z + n.z) * nodeCounts.x + n.x];
     }
 
-    // Склеивает меши суши и воды чанков узла. Вершины чанков сдвигаются на их место внутри узла
-    // (в вокселях: масштаб у узла тот же, что у чанка)
-    void CombineNode(Node node)
+    // Склеивает узлы dirtyNodes[from .. from + count] (CombineNodesJob) и загружает их в меши узлов.
+    // В каждый узел склеиваются меши отрисовки его чанков, вершины чанков сдвигаются на их место
+    // внутри узла (в вокселях: масштаб у узла тот же, что у чанка)
+    void CombineNodes(int from, int count, bool inWorkers)
     {
-        combineLand.Clear();
-        combineWater.Clear();
-        for (int y = 0; y < NodeChunks; y++)
+        combineChunkMeshes.Clear();
+        combineNodeMeshes.Clear();
+        var nodeParts = new NativeArray<int2>(count, Allocator.TempJob);
+        var parts = new NativeArray<NodePart>(count * NodeChunks * NodeChunks * NodeChunks, Allocator.TempJob);
+        int partCount = 0;
+        for (int i = 0; i < count; i++)
         {
-            for (int z = 0; z < NodeChunks; z++)
+            var node = dirtyNodes[from + i];
+            int start = partCount;
+            for (int y = 0; y < NodeChunks; y++)
             {
-                for (int x = 0; x < NodeChunks; x++)
+                for (int z = 0; z < NodeChunks; z++)
                 {
-                    int3 c = node.firstChunk + new int3(x, y, z);
-                    if (math.any(c >= chunkCounts))
-                        continue;
-                    var chunk = chunks[ChunkIndex(c)];
-                    var offset = Matrix4x4.Translate((Vector3)(float3)(new int3(x, y, z) * ChunkSize));
-                    if (chunk.hasLand)
-                        combineLand.Add(new CombineInstance { mesh = chunk.land, transform = offset });
-                    if (chunk.hasWater)
-                        combineWater.Add(new CombineInstance { mesh = chunk.water, transform = offset });
+                    for (int x = 0; x < NodeChunks; x++)
+                    {
+                        int3 c = node.firstChunk + new int3(x, y, z);
+                        if (math.any(c >= chunkCounts))
+                            continue;
+                        var chunk = chunks[ChunkIndex(c)];
+                        if (!chunk.hasLand && !chunk.hasWater)
+                            continue;
+                        parts[partCount++] = new NodePart
+                        {
+                            mesh = combineChunkMeshes.Count,
+                            offset = new float3(x, y, z) * ChunkSize,
+                        };
+                        combineChunkMeshes.Add(chunk.mesh);
+                    }
                 }
             }
+            nodeParts[i] = new int2(start, partCount - start);
+            combineNodeMeshes.Add(node.mesh);
         }
 
-        node.landRenderer.enabled = CombineInto(node.land, combineLand);
-        node.waterRenderer.enabled = CombineInto(node.water, combineWater);
-        node.dirty = false;
-    }
+        var chunkData = Mesh.AcquireReadOnlyMeshData(combineChunkMeshes);
+        var nodeData = Mesh.AllocateWritableMeshData(count);
+        var job = new CombineNodesJob
+        {
+            chunkMeshes = chunkData,
+            parts = parts,
+            nodeParts = nodeParts,
+            colorLayout = colorLayout,
+            nodeSize = NodeChunks * ChunkSize,
+            nodeMeshes = nodeData,
+        };
+        if (inWorkers)
+            job.Schedule(count, 1).Complete();
+        else
+            job.Run(count);
+        chunkData.Dispose();
+        parts.Dispose();
 
-    bool CombineInto(Mesh mesh, List<CombineInstance> parts)
-    {
-        mesh.Clear();
-        if (parts.Count == 0)
-            return false;
-        var array = combineArrays[parts.Count] ??= new CombineInstance[parts.Count];
-        parts.CopyTo(array);
-        mesh.CombineMeshes(array, true, true);
+        Mesh.ApplyAndDisposeWritableMeshData(nodeData, combineNodeMeshes,
+            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
         // Границы задаём явно: по ним Unity решает, виден ли узел камере
         float size = NodeChunks * ChunkSize;
-        mesh.bounds = new Bounds(Vector3.one * (size * 0.5f), Vector3.one * size);
-        return true;
+        var bounds = new Bounds(Vector3.one * (size * 0.5f), Vector3.one * size);
+        for (int i = 0; i < count; i++)
+        {
+            var node = dirtyNodes[from + i];
+            node.mesh.bounds = bounds;
+            node.renderer.enabled = nodeParts[i].y > 0;
+            node.dirty = false;
+        }
+        nodeParts.Dispose();
     }
 
     void RebuildDirtyChunks()
@@ -862,7 +885,7 @@ public class VoxelArena : MonoBehaviour
         ScheduleBatch(batch, 0, faces, inWorkers);
         while (true)
         {
-            // 1. Меши: суша, вода и форма суши — отдельные задачи одной джобы
+            // 1. Меши: отрисовки, форма суши и форма воды — отдельные задачи одной джобы
             timer.Restart();
             if (spread)
                 while (!batch.handle.IsCompleted)
@@ -896,17 +919,23 @@ public class VoxelArena : MonoBehaviour
         LastMeshMs = meshMs;
         LastApplyMs = applyMs;
 
-        // 3. Узлы склеиваются из готовых мешей чанков
+        // 3. Узлы склеиваются из готовых мешей чанков, пачками по CombineNodeBatch
         if (IsGenerating)
             GenerationStage = "Склейка узлов";
         timer.Restart();
-        for (int n = 0; n < dirtyNodes.Count; n++)
+        // Пачка склеивается за единицы мс: ждать её кадрами дольше, чем склеить. Кадр отпускается,
+        // только когда с прошлого кадра прошло CombineFrameBudgetMs, — экран загрузки не замирает
+        frameTimer.Restart();
+        int nodeCount = dirtyNodes.Count;
+        for (int from = 0; from < nodeCount; from += CombineNodeBatch)
         {
-            CombineNode(dirtyNodes[n]);
-            if (spread && n % CombineNodesPerFrame == CombineNodesPerFrame - 1)
+            int batchNodes = Math.Min(CombineNodeBatch, nodeCount - from);
+            CombineNodes(from, batchNodes, inWorkers);
+            if (spread && from + batchNodes < nodeCount && frameTimer.Elapsed.TotalMilliseconds > CombineFrameBudgetMs)
             {
-                GenerationProgress = math.lerp(CombineFrom, 1f, (float)n / dirtyNodes.Count);
+                GenerationProgress = math.lerp(CombineFrom, 1f, (float)(from + batchNodes) / nodeCount);
                 yield return null;
+                frameTimer.Restart();
             }
         }
         dirtyNodes.Clear();
@@ -921,15 +950,15 @@ public class VoxelArena : MonoBehaviour
             ChunkMeshChanged?.Invoke(
                 index,
                 chunk.hasLand ? chunk.shape : null,
-                chunk.hasWater ? chunk.water : null,
+                chunk.hasWater ? chunk.waterShape : null,
                 chunk.root.transform.localToWorldMatrix);
         }
 
         dirtyChunks.Clear();
     }
 
-    // Запускает GreedyMeshJob пачки dirtyChunks[start ..]. Чанку без граней суши не нужны меши суши
-    // и формы, без граней воды — меш воды: задач для них нет
+    // Запускает GreedyMeshJob пачки dirtyChunks[start ..]. Чанку без граней суши не нужна форма суши,
+    // без граней воды — форма воды, без граней вообще — и меш отрисовки: задач для них нет
     void ScheduleBatch(MeshBatch batch, int start, NativeArray<byte> faces, bool inWorkers)
     {
         batch.start = start;
@@ -944,14 +973,15 @@ public class VoxelArena : MonoBehaviour
             int3 origin = ChunkCoord(dirtyChunks[start + k]) * ChunkSize;
             byte chunkFaces = faces[start + k];
 
-            batch.landTask[k] = batch.shapeTask[k] = batch.waterTask[k] = -1;
-            if ((chunkFaces & ChunkFacesJob.LandFaces) != 0)
-            {
-                batch.landTask[k] = AddTask(batch, origin, ChunkMeshKind.Land, chunk.land);
+            batch.colorTask[k] = batch.shapeTask[k] = batch.waterShapeTask[k] = -1;
+            bool landFaces = (chunkFaces & ChunkFacesJob.LandFaces) != 0;
+            bool waterFaces = (chunkFaces & ChunkFacesJob.WaterFaces) != 0;
+            if (landFaces || waterFaces)
+                batch.colorTask[k] = AddTask(batch, origin, ChunkMeshKind.Color, chunk.mesh);
+            if (landFaces)
                 batch.shapeTask[k] = AddTask(batch, origin, ChunkMeshKind.Shape, chunk.shape);
-            }
-            if ((chunkFaces & ChunkFacesJob.WaterFaces) != 0)
-                batch.waterTask[k] = AddTask(batch, origin, ChunkMeshKind.Water, chunk.water);
+            if (waterFaces)
+                batch.waterShapeTask[k] = AddTask(batch, origin, ChunkMeshKind.WaterShape, chunk.waterShape);
         }
 
         int taskCount = batch.tasks.Length;
@@ -1006,16 +1036,27 @@ public class VoxelArena : MonoBehaviour
 
             // Чанк был пустым и остался пустым (воздух над картой, порода под ней — большая часть арены
             // при генерации): меши уже пусты, коллайдер выключен, узел перестраивать незачем
-            if (!hadLand && !hadWater && batch.landTask[k] < 0 && batch.waterTask[k] < 0)
+            if (!hadLand && !hadWater && batch.colorTask[k] < 0)
                 continue;
 
             // Переназначение заставляет коллайдер взять новые данные
             if (hadLand)
                 chunk.collider.sharedMesh = null;
 
-            int landIndices = TaskIndexCount(batch, batch.landTask[k], chunk.land, hadLand);
+            // Меш отрисовки: суша и вода — его сабмеши 0 и 1
+            int landIndices = 0, waterIndices = 0;
+            int colorTask = batch.colorTask[k];
+            if (colorTask < 0)
+            {
+                chunk.mesh.Clear();
+            }
+            else
+            {
+                landIndices = batch.data[colorTask].GetSubMesh(0).indexCount;
+                waterIndices = batch.data[colorTask].GetSubMesh(1).indexCount;
+            }
             int shapeIndices = TaskIndexCount(batch, batch.shapeTask[k], chunk.shape, hadLand);
-            int waterIndices = TaskIndexCount(batch, batch.waterTask[k], chunk.water, hadWater);
+            TaskIndexCount(batch, batch.waterShapeTask[k], chunk.waterShape, hadWater);
             chunk.hasLand = landIndices > 0;
             chunk.hasWater = waterIndices > 0;
             if (chunk.hasLand && inWorkers)
@@ -1083,8 +1124,10 @@ public class VoxelArena : MonoBehaviour
         return batch.data[task].GetSubMesh(0).indexCount;
     }
 
-    // Сколько узлов склеивать за кадр при генерации по кадрам
-    const int CombineNodesPerFrame = 128;
+    // Узлов в одной пачке склейки
+    const int CombineNodeBatch = 128;
+    // При генерации по кадрам склейка отпускает кадр не чаще, чем раз в столько мс
+    const double CombineFrameBudgetMs = 33;
     // Сколько чанков за раз строится в главном потоке, а не в рабочих
     const int MainThreadChunkLimit = 12;
     // Чанков в одной пачке перестройки

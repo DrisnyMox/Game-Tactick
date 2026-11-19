@@ -45,6 +45,8 @@ public class CharacterHealth : MonoBehaviour, IShootable
     public float LastHitTime { get; private set; } = float.NegativeInfinity;
     /// <summary>Где стоял стрелок при последнем попадании: туда показывает стрелка урона</summary>
     public Vector3 LastHitFrom { get; private set; }
+    /// <summary>Кто попал последним: бот-рейдер отвечает ему огнём</summary>
+    public CharacterHealth LastAttacker { get; private set; }
 
     public event Action<CharacterHealth> Died;
 
@@ -112,6 +114,7 @@ public class CharacterHealth : MonoBehaviour, IShootable
         Health -= damage * (headshot ? headMultiplier : 1f);
         LastHitTime = Time.time;
         LastHitFrom = attacker.transform.position;
+        LastAttacker = attacker;
         if (Health <= 0f)
         {
             Health = 0f;
@@ -128,6 +131,8 @@ public class CharacterHealth : MonoBehaviour, IShootable
     /// <summary>Снова живой, полное здоровье, стоит в position лицом в rotation</summary>
     public void Revive(Vector3 position, Quaternion rotation)
     {
+        // Рейдер, ушедший с карты (Withdraw), возвращается новым рейдером
+        gameObject.SetActive(true);
         SetRagdoll(false);
         // CharacterController перезаписывает положение, пока включён
         controller.enabled = false;
@@ -137,7 +142,32 @@ public class CharacterHealth : MonoBehaviour, IShootable
         GetComponent<ThirdPersonController>().SetCameraYaw(rotation.eulerAngles.y);
         Health = maxHealth;
         LastHitTime = float.NegativeInfinity;
+        LastAttacker = null;
         shooter.Refill();
+    }
+
+    /// <summary>Прибавить здоровья, не больше максимума</summary>
+    public void Heal(float amount)
+    {
+        if (!IsDead)
+            Health = Mathf.Min(maxHealth, Health + amount);
+    }
+
+    /// <summary>Новый максимум здоровья (бронежилет), здоровье полное</summary>
+    public void SetMaxHealth(float value)
+    {
+        maxHealth = value;
+        Health = value;
+    }
+
+    /// <summary>
+    /// Ушёл с карты (рейдер эвакуировался): объект выключен, для ботов он как уничтоженный, но без рэгдолла,
+    /// событий Died и Killed. Вернуть — Revive
+    /// </summary>
+    public void Withdraw()
+    {
+        Health = 0f;
+        gameObject.SetActive(false);
     }
 
     void SetRagdoll(bool on)

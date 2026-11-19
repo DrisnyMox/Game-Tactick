@@ -9,12 +9,12 @@ using UnityEngine.Rendering;
 /// <summary>Какой меш чанка строить</summary>
 public enum ChunkMeshKind : byte
 {
-    // Суша: всё, кроме воды, с цветом и затенением
-    Land,
-    // Вода
-    Water,
+    // Меш отрисовки с цветом: сабмеш 0 — суша (всё, кроме воды, с затенением), сабмеш 1 — вода
+    Color,
     // Форма суши без цвета, затенения и нормалей: для MeshCollider и NavMesh
     Shape,
+    // Форма воды без цвета и нормалей: NavMesh отмечает по ней воду непроходимой
+    WaterShape,
 }
 
 /// <summary>Один меш одного чанка: начало чанка в вокселях и вид меша</summary>
@@ -62,8 +62,9 @@ public struct GreedyMeshScratch
 /// Строит меши пачки чанков и пишет их прямо в Mesh.MeshDataArray: в главном потоке остаётся
 /// только Mesh.ApplyAndDisposeWritableMeshData. Задача index пишет в meshes[index].
 /// Чанки без видимых граней сюда не попадают: их отсеивает ChunkFacesJob.
-/// Вершины суши и воды — три потока: позиция (float3), нормаль (float3), цвет (4 байта:
-/// r — индекс палитры, g — затенение угла). У формы — только позиция.
+/// Вершины меша отрисовки — три потока: позиция (float3), нормаль (float3), цвет (4 байта:
+/// r — индекс палитры, g — затенение угла). У него два сабмеша на общих вершинах: 0 — суша, 1 — вода
+/// (у каждого свой материал). У форм — только позиция и один сабмеш.
 /// </summary>
 [BurstCompile]
 public struct GreedyMeshJob : IJobParallelFor
@@ -73,7 +74,7 @@ public struct GreedyMeshJob : IJobParallelFor
     public int3 dims;
     public int chunkSize;
     [ReadOnly] public NativeArray<ChunkMeshTask> tasks;
-    // Раскладка вершин суши и воды (позиция, нормаль, цвет) и формы (позиция)
+    // Раскладка вершин меша отрисовки (позиция, нормаль, цвет) и форм (позиция)
     [ReadOnly] public NativeArray<VertexAttributeDescriptor> colorLayout;
     [ReadOnly] public NativeArray<VertexAttributeDescriptor> shapeLayout;
     public Mesh.MeshDataArray meshes;
@@ -85,7 +86,7 @@ public struct GreedyMeshJob : IJobParallelFor
     public void Execute(int index)
     {
         var task = tasks[index];
-        bool plain = task.kind == ChunkMeshKind.Shape;
+        bool plain = task.kind != ChunkMeshKind.Color;
 
         var lists = scratch[threadIndex];
         if (!lists.blocks.IsCreated)
@@ -107,7 +108,7 @@ public struct GreedyMeshJob : IJobParallelFor
         {
             faceColors = faceColors,
             chunkSize = chunkSize,
-            water = task.kind == ChunkMeshKind.Water,
+            water = task.kind == ChunkMeshKind.WaterShape,
             plain = plain,
             blocks = lists.blocks,
             mask = lists.mask,
@@ -118,7 +119,14 @@ public struct GreedyMeshJob : IJobParallelFor
         };
         mesher.CopyBlocks(voxels, dims, task.origin);
         mesher.Build();
-        Write(meshes[index], ref mesher, plain);
+        // Меш отрисовки: вода дописывается после суши в те же списки, её индексы — второй сабмеш
+        int landIndices = mesher.indices.Length;
+        if (!plain)
+        {
+            mesher.water = true;
+            mesher.Build();
+        }
+        Write(meshes[index], ref mesher, plain, landIndices);
 
         // Списки могли вырасти и переехать: поток забирает их обратно
         lists.blocks = mesher.blocks;
@@ -130,7 +138,9 @@ public struct GreedyMeshJob : IJobParallelFor
         scratch[threadIndex] = lists;
     }
 
-    void Write(Mesh.MeshData data, ref GreedyMesher mesher, bool plain)
+    // landIndices — сколько индексов в начале списка у суши (сабмеш 0), остальные — вода (сабмеш 1).
+    // У форм сабмеш один
+    void Write(Mesh.MeshData data, ref GreedyMesher mesher, bool plain, int landIndices)
     {
         int vertexCount = mesher.positions.Length;
         int indexCount = mesher.indices.Length;
@@ -156,13 +166,33 @@ public struct GreedyMeshJob : IJobParallelFor
             indices[i] = mesher.indices[i];
 
         // Границы — весь чанк: по ним Unity решает, виден ли чанк камере
-        data.subMeshCount = 1;
-        data.SetSubMesh(0, new SubMeshDescriptor(0, indexCount)
+        var bounds = new Bounds(Vector3.one * (chunkSize * 0.5f), Vector3.one * chunkSize);
+        const MeshUpdateFlags flags = MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices;
+        if (plain)
         {
-            bounds = new Bounds(Vector3.one * (chunkSize * 0.5f), Vector3.one * chunkSize),
+            data.subMeshCount = 1;
+            data.SetSubMesh(0, new SubMeshDescriptor(0, indexCount)
+            {
+                bounds = bounds,
+                firstVertex = 0,
+                vertexCount = vertexCount,
+            }, flags);
+            return;
+        }
+
+        data.subMeshCount = 2;
+        data.SetSubMesh(0, new SubMeshDescriptor(0, landIndices)
+        {
+            bounds = bounds,
             firstVertex = 0,
             vertexCount = vertexCount,
-        }, MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+        }, flags);
+        data.SetSubMesh(1, new SubMeshDescriptor(landIndices, indexCount - landIndices)
+        {
+            bounds = bounds,
+            firstVertex = 0,
+            vertexCount = vertexCount,
+        }, flags);
     }
 }
 
@@ -177,7 +207,7 @@ struct GreedyMesher
 {
     public NativeArray<byte> faceColors;
     public int chunkSize;
-    // false — меш суши (всё, кроме воды), true — меш воды
+    // false — грани суши (всё, кроме воды), true — грани воды
     public bool water;
     public bool plain;
 
