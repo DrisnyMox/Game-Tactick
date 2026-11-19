@@ -5,27 +5,35 @@ using Unity.Mathematics;
 
 /// <summary>
 /// Раскладка архипелага для вылазки (ArenaShape.Island): Бирюзовые Пределы из лора.
-/// Много маленьких островов, между ними мелководье. Вода стоит до SeaLevel клеток минус один воксель
-/// (ArenaLayout.waterDropVoxels): над дном мелководья (SeaLevel - 1) воды 1 воксель, над протоками (SeaLevel - 2) —
-/// 3 вокселя, персонаж ростом 8 вокселей бегает по дну. Глубоко только в кольце у края карты.
-///  * Острова — пятна шума; к краю карты шум гаснет, там открытая вода.
-//  * Острова плоские: песок на 1 воксель над водой, в глубине на 3, редкие дюны на 5. Соседние клетки отличаются
-///    не больше чем на одну: и острова, и дно проходимы.
+/// Крупные острова, между ними мелководье. Вода стоит до SeaLevel клеток минус один воксель
+/// (ArenaLayout.waterDropVoxels, в вокселях — seaTop): у берега воды 1 воксель, дальше до 3,
+/// персонаж ростом 8 вокселей бегает по дну. Глубоко только в кольце у края карты.
+///  * Острова — пятна крупного шума; к краю карты шум гаснет, там открытая вода.
+///  * Высоты — в вокселях с дробной частью (ArenaLayout.surface): берег у воды вровень с ней, дальше суша
+///    поднимается на воксель через каждые 8 вокселей от воды, до 3 над водой. Дно так же уходит до 3 вокселей.
 ///  * Причалы (ResourceKind.Landing): 6 лучей от края карты к середине, первый берег на луче. Первый причал —
 ///    высадка игрока (baseOne), самый дальний от него — baseTwo. Ворота (gates) — 10 клеток от причала в сторону суши.
-//  * Ржавые остовы (Wreck) — 3 на мелководье, руины (Ruin) — 5 на ровных местах 17×17 клеток, на суше или затопленные.
+///  * Ржавые остовы (Wreck) — 3 на мелководье, руины (Ruin) — 5 на островах, на ровной площадке 17×17 клеток.
 ///  * Постройки ArenaDecorator пишет вокселями под рост персонажа (8 вокселей), а не клетками.
 ///  * Пальмы на островах, на больших островах вперемешку с лиственными деревьями; валуны на суше и в воде.
-/// Баз, стен, рамп нет. Высоты — в клетках раскладки, как у арены.
+/// Баз, стен, рамп нет. height — та же высота в клетках с округлением вниз (для построек в клетках и проверок воды).
 /// </summary>
 public static class IslandLayout
 {
     /// <summary>Вода стоит до этой высоты (клетки раскладки) без одного вокселя</summary>
     public const int SeaLevel = 8;
+    const int WaterDrop = 1;
 
-    public static ArenaLayoutGenerator.Pending Schedule(ArenaGenSettings settings, int sizeX, int sizeY, int sizeZ)
+    public static ArenaLayoutGenerator.Pending Schedule(ArenaGenSettings settings, int sizeX, int sizeY, int sizeZ, int cellVoxels)
     {
-        var layout = new ArenaLayout(sizeX, sizeZ) { seaLevel = SeaLevel, waterDropVoxels = 1, wadeableWater = true };
+        var layout = new ArenaLayout(sizeX, sizeZ)
+        {
+            seaLevel = SeaLevel,
+            waterDropVoxels = WaterDrop,
+            wadeableWater = true,
+            grassRaiseVoxels = 1,
+            fineSurface = true,
+        };
         var random = new Random(math.hash(new int2(settings.seed, 11)) | 1u);
         var info = new NativeArray<int>(ArenaLayoutGenerator.InfoCount, Allocator.Persistent);
         var axis = new NativeArray<float2>(1, Allocator.Persistent);
@@ -36,12 +44,13 @@ public static class IslandLayout
         {
             sx = sizeX,
             sz = sizeZ,
-            maxHeight = sizeY - 4,
+            k = cellVoxels,
+            seaTop = SeaLevel * cellVoxels - WaterDrop,
             seed = random.NextUInt() | 1u,
             islandOffset = random.NextFloat2(-5000f, 5000f),
             densityOffset = random.NextFloat2(-5000f, 5000f),
-            hillOffset = random.NextFloat2(-5000f, 5000f),
-            channelOffset = random.NextFloat2(-5000f, 5000f),
+            grassOffset = random.NextFloat2(-5000f, 5000f),
+            outSurface = layout.surface,
             outHeight = layout.height,
             outWaterTop = layout.waterTop,
             outFlags = layout.flags,
@@ -64,11 +73,19 @@ public static class IslandLayout
         // Ширина кольца у края карты, где вода глубокая, и докуда от края острова редеют, в клетках
         const int DeepRing = 22;
         const int FadeTo = 60;
+        // Острова меньше этого (клеток) всегда только из песка
+        const int MinGrassIsland = 200;
+        // Уступ в 1 воксель — через StepVoxels вокселей от воды (8 — рост персонажа): суша поднимается, дно уходит вниз.
+        // Выше MaxLand вокселей над водой и глубже MaxDepth вокселей воды не бывает
+        const float StepVoxels = 8f, MaxLand = 3f, MaxDepth = 3f, EdgeDepth = 9f;
 
-        public int sx, sz, maxHeight;
+        public int sx, sz;
+        // Вокселей в клетке; верх воды в вокселях: вода стоит в вокселях ниже seaTop
+        public int k, seaTop;
         public uint seed;
-        public float2 islandOffset, densityOffset, hillOffset, channelOffset;
+        public float2 islandOffset, densityOffset, grassOffset;
 
+        public NativeArray<float> outSurface;
         public NativeArray<int> outHeight;
         public NativeArray<int> outWaterTop;
         public NativeArray<byte> outFlags;
@@ -84,6 +101,14 @@ public static class IslandLayout
         int Idx(int x, int z) => z * sx + x;
         bool Inside(int2 c) => c.x >= 0 && c.y >= 0 && c.x < sx && c.y < sz;
         bool IsWater(int i) => outWaterTop[i] > outHeight[i];
+
+        void Spread(int i, int id, NativeArray<int> island, NativeList<int> stack)
+        {
+            if (island[i] != 0 || IsWater(i))
+                return;
+            island[i] = id;
+            stack.Add(i);
+        }
         int EdgeDistance(int x, int z) => math.min(math.min(x, z), math.min(sx - 1 - x, sz - 1 - z));
 
         public void Execute()
@@ -96,7 +121,6 @@ public static class IslandLayout
             rnd = new Random(seed);
 
             Terrain(shape);
-            LimitSlopes();
             Sand(shape);
 
             var landings = new NativeList<int2>(8, Allocator.Temp);
@@ -106,11 +130,6 @@ public static class IslandLayout
                 landings.Add(NearestLand());
             PlaceWrecks(landings, occupied);
             PlaceRuins(landings, occupied);
-            // Засыпка под руинами могла дать ступень к воде: снова не больше клетки, а всё ниже уровня моря — под водой
-            LimitSlopes();
-            for (int i = 0; i < n; i++)
-                if (outHeight[i] < SeaLevel)
-                    outWaterTop[i] = SeaLevel;
             PlaceVegetation(shape, occupied);
 
             // База один — высадка игрока, база два — самый дальний причал, ворота — в сторону суши
@@ -137,10 +156,14 @@ public static class IslandLayout
             outAxis[0] = math.normalizesafe((float2)(two - one));
         }
 
-        // Острова — пятна шума, местами гуще (второй, крупный шум). Вода: у берега мелко, в протоках глубже,
-        // у края карты глубоко. Суша плоская: 1–3 вокселя над водой, редко 5
+        // Острова — пятна крупного шума, местами гуще (второй, ещё крупнее). Высота в вокселях — от расстояния до берега:
+        // первые StepVoxels вокселей суши вровень с водой, дальше на каждые StepVoxels — воксель выше, до MaxLand.
+        // Дно так же: у берега воды 1 воксель, на каждые StepVoxels — воксель глубже, до MaxDepth. У края карты глубоко
         void Terrain(NativeArray<float> shape)
         {
+            int n = sx * sz;
+            var toWater = new NativeArray<float>(n, Allocator.Temp);
+            var toLand = new NativeArray<float>(n, Allocator.Temp);
             for (int z = 0; z < sz; z++)
             {
                 for (int x = 0; x < sx; x++)
@@ -148,59 +171,118 @@ public static class IslandLayout
                     int i = Idx(x, z);
                     var p = new float2(x, z);
                     int edge = EdgeDistance(x, z);
-                    float density = Fbm(p, 0.006f, 2, densityOffset) * 0.12f;
-                    float s = Fbm(p, 0.022f, 4, islandOffset) - 0.1f + density;
+                    float density = Fbm(p, 0.004f, 2, densityOffset) * 0.12f;
+                    float s = Fbm(p, 0.011f, 4, islandOffset) - 0.1f + density;
                     s -= math.saturate((FadeTo - edge) / (float)(FadeTo - DeepRing)) * 0.7f;
                     shape[i] = s;
+                    toWater[i] = s < 0f ? 0f : float.MaxValue;
+                    toLand[i] = s < 0f ? float.MaxValue : 0f;
+                }
+            }
+            Chamfer(toWater);
+            Chamfer(toLand);
 
-                    if (s < 0f)
+            for (int z = 0; z < sz; z++)
+            {
+                for (int x = 0; x < sx; x++)
+                {
+                    int i = Idx(x, z);
+                    // Расстояние от середины клетки до берега в вокселях: берег — посередине между клетками суши и воды
+                    float surface;
+                    if (shape[i] >= 0f)
                     {
-                        int depth;
-                        if (edge < DeepRing)
-                            depth = 5;
-                        else if (s > -0.05f)
-                            depth = 1;
-                        else
-                            depth = Fbm(p, 0.03f, 2, channelOffset) > 0f ? 2 : 1;
-                        outHeight[i] = SeaLevel - depth;
-                        outWaterTop[i] = SeaLevel;
-                        continue;
+                        float fromShore = (toWater[i] - 0.5f) * k;
+                        surface = seaTop + math.min(fromShore / StepVoxels, MaxLand) - 0.49f;
                     }
-
-                    // Острова плоские: у воды песок на 1 воксель над водой, в глубине на 3, редкие дюны на 5 (~1,1 м)
-                    float dune = Fbm(p, 0.03f, 2, hillOffset);
-                    outHeight[i] = SeaLevel + (s > 0.12f ? 1 : 0) + (s > 0.25f && dune > 0.35f ? 1 : 0);
+                    else if (EdgeDistance(x, z) < DeepRing)
+                    {
+                        surface = seaTop - EdgeDepth;
+                    }
+                    else
+                    {
+                        float fromShore = (toLand[i] - 0.5f) * k;
+                        surface = seaTop - math.min(1f + fromShore / StepVoxels, MaxDepth) + 0.49f;
+                    }
+                    SetSurface(i, surface);
                 }
             }
         }
 
-        // Соседние клетки отличаются не больше чем на одну: высота не больше соседа + 1 (проход вперёд и назад)
-        void LimitSlopes()
+        // Расстояние в клетках до ближайшей клетки с 0 (проход вперёд и назад, по диагонали √2)
+        void Chamfer(NativeArray<float> dist)
         {
+            const float Diagonal = 1.4142135f;
             for (int z = 0; z < sz; z++)
                 for (int x = 0; x < sx; x++)
                 {
                     int i = Idx(x, z);
-                    if (x > 0) outHeight[i] = math.min(outHeight[i], outHeight[i - 1] + 1);
-                    if (z > 0) outHeight[i] = math.min(outHeight[i], outHeight[i - sx] + 1);
+                    float d = dist[i];
+                    if (x > 0) d = math.min(d, dist[i - 1] + 1f);
+                    if (z > 0) d = math.min(d, dist[i - sx] + 1f);
+                    if (x > 0 && z > 0) d = math.min(d, dist[i - sx - 1] + Diagonal);
+                    if (x < sx - 1 && z > 0) d = math.min(d, dist[i - sx + 1] + Diagonal);
+                    dist[i] = d;
                 }
             for (int z = sz - 1; z >= 0; z--)
                 for (int x = sx - 1; x >= 0; x--)
                 {
                     int i = Idx(x, z);
-                    if (x < sx - 1) outHeight[i] = math.min(outHeight[i], outHeight[i + 1] + 1);
-                    if (z < sz - 1) outHeight[i] = math.min(outHeight[i], outHeight[i + sx] + 1);
+                    float d = dist[i];
+                    if (x < sx - 1) d = math.min(d, dist[i + 1] + 1f);
+                    if (z < sz - 1) d = math.min(d, dist[i + sx] + 1f);
+                    if (x < sx - 1 && z < sz - 1) d = math.min(d, dist[i + sx + 1] + Diagonal);
+                    if (x > 0 && z < sz - 1) d = math.min(d, dist[i + sx - 1] + Diagonal);
+                    dist[i] = d;
                 }
         }
 
-        // Песок: дно, пляж у воды и низкие края островов
+        // Высота клетки в вокселях; height и waterTop в клетках — по ней: вода, если поверхность ниже seaTop
+        void SetSurface(int i, float surface)
+        {
+            outSurface[i] = surface;
+            int voxels = (int)math.floor(surface + 0.5f);
+            outHeight[i] = voxels / k;
+            outWaterTop[i] = voxels < seaTop ? SeaLevel : 0;
+        }
+
+        // Песок: дно и вся суша, кроме травы. Трава с землёй — только на части островов (на половине крупных),
+        // и там пятнами в глубине острова, не у воды. Клетка травы на ArenaLayout.grassRaiseVoxels выше песка
         void Sand(NativeArray<float> shape)
         {
-            for (int i = 0; i < sx * sz; i++)
+            int n = sx * sz;
+            // Номер острова клетки + 1 (0 — вода): острова — связные куски суши
+            var island = new NativeArray<int>(n, Allocator.Temp);
+            var grassy = new NativeList<bool>(64, Allocator.Temp);
+            var stack = new NativeList<int>(256, Allocator.Temp);
+            for (int start = 0; start < n; start++)
+            {
+                if (island[start] != 0 || IsWater(start))
+                    continue;
+                int id = grassy.Length + 1;
+                int size = 0;
+                island[start] = id;
+                stack.Add(start);
+                while (stack.Length > 0)
+                {
+                    int i = stack[stack.Length - 1];
+                    stack.RemoveAt(stack.Length - 1);
+                    size++;
+                    int x = i % sx, z = i / sx;
+                    if (x > 0) Spread(i - 1, id, island, stack);
+                    if (x < sx - 1) Spread(i + 1, id, island, stack);
+                    if (z > 0) Spread(i - sx, id, island, stack);
+                    if (z < sz - 1) Spread(i + sx, id, island, stack);
+                }
+                grassy.Add(size >= MinGrassIsland && rnd.NextFloat() < 0.5f);
+            }
+
+            for (int i = 0; i < n; i++)
             {
                 if ((outFlags[i] & ArenaLayout.FlagRock) != 0)
                     continue;
-                if (IsWater(i) || outHeight[i] <= SeaLevel || shape[i] < 0.05f)
+                bool grass = island[i] != 0 && grassy[island[i] - 1] && shape[i] > 0.15f
+                             && Fbm(new float2(i % sx, i / sx), 0.04f, 2, grassOffset) > 0.2f;
+                if (!grass)
                     outFlags[i] |= ArenaLayout.FlagSand;
             }
         }
@@ -268,7 +350,8 @@ public static class IslandLayout
                 if (occupied[Idx(c.x, c.y)] || IsWater(Idx(c.x, c.y)) || !Far(c, ruins, 45f) || !Far(c, landings, 25f))
                     continue;
 
-                int low = int.MaxValue, high = int.MinValue, land = 0;
+                float low = float.MaxValue;
+                int land = 0;
                 bool clear = true;
                 for (int dz = -8; dz <= 8 && clear; dz++)
                     for (int dx = -8; dx <= 8; dx++)
@@ -282,18 +365,29 @@ public static class IslandLayout
                         if (IsWater(j))
                             continue;
                         land++;
-                        low = math.min(low, outHeight[j]);
-                        high = math.max(high, outHeight[j]);
+                        low = math.min(low, outSurface[j]);
                     }
-                if (!clear || land < 17 * 17 * 6 / 10 || high - low > 2)
+                if (!clear || land < 17 * 17 * 6 / 10)
                     continue;
 
-                for (int dz = -8; dz <= 8; dz++)
-                    for (int dx = -8; dx <= 8; dx++)
+                // Площадка вровень с самой низкой сушей (не ниже берега), вокруг 12 клеток спуска с тем же шагом,
+                // что у берегов (воксель на StepVoxels): вода у площадки мелеет к ней, а не обрывается уступом
+                float pad = math.max(math.floor(low + 0.5f), seaTop);
+                for (int dz = -20; dz <= 20; dz++)
+                    for (int dx = -20; dx <= 20; dx++)
                     {
                         int j = Idx(c.x + dx, c.y + dz);
-                        outHeight[j] = low;
-                        outWaterTop[j] = 0;
+                        int ring = math.max(math.abs(dx), math.abs(dz));
+                        if (ring <= 8)
+                        {
+                            SetSurface(j, pad);
+                            // Пол руин ровный: трава не поднимает клетки под домом
+                            outFlags[j] |= ArenaLayout.FlagSand;
+                        }
+                        else
+                        {
+                            SetSurface(j, math.max(outSurface[j], pad - (ring - 8) * k / StepVoxels));
+                        }
                     }
                 ruins.Add(c);
                 outResources.Add(new ResourcePoint { cell = c, kind = ResourceKind.Ruin, team = -1 });

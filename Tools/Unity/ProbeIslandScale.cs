@@ -22,7 +22,20 @@ public static class ProbeIslandScale
         Directory.CreateDirectory("Temp/Shots");
         var s = new StringBuilder();
 
-        Vector3 Root(int2 cell) => arena.VoxelToWorld(new float3(cell.x * k + k / 2, layout.height[cell.y * layout.sizeX + cell.x] * k, cell.y * k + k / 2));
+        Vector3 Root(int2 cell) => arena.VoxelToWorld(new float3(cell.x * k + k / 2, arena.GroundY(cell.x * k + k / 2, cell.y * k + k / 2), cell.y * k + k / 2));
+
+        // Край травы: клетка травы, справа от которой песок той же высоты (уступ травы над песком)
+        for (int z = 10; z < layout.sizeZ - 10 && !s.ToString().Contains("grass"); z++)
+            for (int x = 10; x < layout.sizeX - 10; x++)
+            {
+                int i = z * layout.sizeX + x;
+                if (!ArenaLayout.IsRaisedGrass(layout.flags[i], layout.grassRaiseVoxels) || (layout.flags[i + 1] & ArenaLayout.FlagSand) == 0
+                    || layout.waterTop[i + 1] > layout.height[i + 1])
+                    continue;
+                Shoot(player, Root(new int2(x, z)), 1.5f, 7f, "Temp/Shots/scale_grass.png");
+                s.Append("grass ");
+                break;
+            }
 
         foreach (var cell in layout.trees)
         {

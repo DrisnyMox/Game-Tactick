@@ -46,6 +46,10 @@ public class RaidDirector : MonoBehaviour
     [Tooltip("Ближе этого к игроку рейдеры на карту не выходят, м")]
     [SerializeField] float minRaiderDistance = 50f;
     [SerializeField] int blueprintCrates = 2;
+    [Tooltip("Остров: сколько ящиков лежит просто на песке, кроме ящиков в руинах и остовах")]
+    [SerializeField] int sandCrates = 6;
+    [Tooltip("Ящики на песке не ближе этого друг к другу, к другим ящикам и к высадке, м")]
+    [SerializeField] float sandCrateSpacing = 25f;
     [Tooltip("Насколько выше поверхности ставить персонажа, м")]
     [SerializeField] float lift = 0.1f;
 
@@ -143,7 +147,7 @@ public class RaidDirector : MonoBehaviour
         // Revive зарядил полный магазин даром, а первый магазин тоже берётся из рюкзака
         playerShooter.SetLoaded(playerBackpack.TakeAmmo(playerShooter.MagazineSize));
 
-        // Остров: эвакуация — 3 причала, дальние от высадки и не рядом друг с другом; ящики — в руинах и остовах.
+        // Остров: эвакуация — 3 причала, дальние от высадки и не рядом друг с другом; ящики — в руинах, остовах и на песке.
         // Арена RTS: эвакуация — база два и две дальние точки захвата, ящики — у остальных точек
         var exitCandidates = new List<Vector3>();
         var crates = new List<Vector3>();
@@ -161,6 +165,8 @@ public class RaidDirector : MonoBehaviour
             else
                 crates.Add(SiteFloor(layout, resource));
         }
+        if (island)
+            AddSandCrates(layout, crates);
         if (!island)
             exits.Add(Ground(arena.BaseTwo));
         exitCandidates.Sort((a, b) => Flat(b - arena.BaseOne).sqrMagnitude.CompareTo(Flat(a - arena.BaseOne).sqrMagnitude));
@@ -205,6 +211,26 @@ public class RaidDirector : MonoBehaviour
             SendRaider(raider);
     }
 
+    // Ящики просто на песке: голые клетки суши (без дерева, камня и травы) не ближе sandCrateSpacing
+    // друг к другу, к ящикам построек и к высадке игрока
+    void AddSandCrates(ArenaLayout layout, List<Vector3> crates)
+    {
+        for (int attempt = 0, added = 0; attempt < 300 && added < sandCrates; attempt++)
+        {
+            var cell = spawnCells[UnityEngine.Random.Range(0, spawnCells.Count)];
+            if ((layout.flags[cell.y * layout.sizeX + cell.x] & ArenaLayout.FlagSand) == 0)
+                continue;
+            var point = arena.CellTop(cell);
+            bool apart = Flat(point - arena.BaseOne).magnitude > sandCrateSpacing;
+            foreach (var crate in crates)
+                apart &= Flat(point - crate).magnitude > sandCrateSpacing;
+            if (!apart)
+                continue;
+            crates.Add(point);
+            added++;
+        }
+    }
+
     // Пол посередине руин или палуба остова: обе постройки стоят центром на точке
     Vector3 SiteFloor(ArenaLayout layout, ResourcePoint site)
     {
@@ -215,7 +241,8 @@ public class RaidDirector : MonoBehaviour
     int3 SiteRoot(ArenaLayout layout, int2 cell)
     {
         int k = arena.CellVoxels;
-        return new int3(cell.x * k + k / 2, layout.height[cell.y * layout.sizeX + cell.x] * k, cell.y * k + k / 2);
+        int x = cell.x * k + k / 2, z = cell.y * k + k / 2;
+        return new int3(x, arena.GroundY(x, z), z);
     }
 
     static GatherSpot Box(int3 root, int3 min, int3 max) => new GatherSpot { min = root + min, max = root + max };
@@ -298,7 +325,7 @@ public class RaidDirector : MonoBehaviour
                 if (layout.baseArea[i] != 0 || layout.waterTop[i] != 0 || (layout.flags[i] & ArenaLayout.FlagRock) != 0)
                     continue;
                 int vx = x * k + k / 2, vz = z * k + k / 2;
-                if (arena.IsWaterAt(vx, vz) || arena.SurfaceY(vx, vz) != layout.height[i] * k)
+                if (arena.IsWaterAt(vx, vz) || arena.SurfaceY(vx, vz) != arena.GroundY(vx, vz))
                     continue;
                 spawnCells.Add(new int2(x, z));
             }

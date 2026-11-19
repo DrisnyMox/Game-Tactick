@@ -338,7 +338,7 @@ public class VoxelArena : MonoBehaviour
 
         Biome = ArenaBiomes.Resolve(generation.biome, generation.seed);
         int k = cellVoxels;
-        pendingLayout = ArenaLayoutGenerator.Schedule(generation, Biome, dims.x / k, dims.y / k, dims.z / k);
+        pendingLayout = ArenaLayoutGenerator.Schedule(generation, Biome, dims.x / k, dims.y / k, dims.z / k, k);
         if (spread)
             while (!pendingLayout.IsCompleted)
                 yield return null;
@@ -366,6 +366,10 @@ public class VoxelArena : MonoBehaviour
             cellWaterTop = Layout.waterTop,
             cellFlags = Layout.flags,
             waterDrop = Layout.waterDropVoxels,
+            grassRaise = Layout.grassRaiseVoxels,
+            fineSurface = Layout.fineSurface,
+            cellSurface = Layout.surface,
+            seaTop = Layout.seaLevel * k - Layout.waterDropVoxels,
             height = columnHeight,
             waterTop = genWaterTop,
             flags = genFlags,
@@ -381,7 +385,7 @@ public class VoxelArena : MonoBehaviour
             voxels = voxels,
         }.Schedule(columns, dims.x, expand);
 
-        generationJobs = ArenaDecorator.Schedule(voxels, dims, cellVoxels, Layout, Biome, generation.seed, generation.wallHeight, fill);
+        generationJobs = ArenaDecorator.Schedule(voxels, dims, cellVoxels, Layout, columnHeight, Biome, generation.seed, generation.wallHeight, fill);
         JobHandle.ScheduleBatchedJobs();
         if (spread)
             while (!generationJobs.IsCompleted)
@@ -437,6 +441,11 @@ public class VoxelArena : MonoBehaviour
         public int cellVoxels;
         public int layoutSizeX, layoutSizeZ;
         public int waterDrop;
+        public int grassRaise;
+        // Остров: высоты столбцов — из дробной высоты клеток в вокселях (ArenaLayout.surface), вода везде до seaTop
+        public bool fineSurface;
+        public int seaTop;
+        [ReadOnly] public NativeArray<float> cellSurface;
         [ReadOnly] public NativeArray<int> cellHeight;
         [ReadOnly] public NativeArray<int> cellWaterTop;
         [ReadOnly] public NativeArray<byte> cellFlags;
@@ -460,6 +469,23 @@ public class VoxelArena : MonoBehaviour
             int nx = ox < 0 ? cx - 1 : cx + 1;
 
             int cell = cz * lx + cx;
+            int raise = ArenaLayout.IsRaisedGrass(cellFlags[cell], grassRaise) ? grassRaise : 0;
+            if (fineSurface)
+            {
+                // Высота между серединами четырёх соседних клеток — плавно: берег поднимается на воксель
+                // через несколько вокселей, а не на каждом
+                float fx = (x + 0.5f) / k - 0.5f, fz = (z + 0.5f) / k - 0.5f;
+                int x0 = math.clamp((int)math.floor(fx), 0, lx - 2), z0 = math.clamp((int)math.floor(fz), 0, lz - 2);
+                float tx = math.saturate(fx - x0), tz = math.saturate(fz - z0);
+                int c00 = z0 * lx + x0;
+                float near = math.lerp(cellSurface[c00], cellSurface[c00 + 1], tx);
+                float far = math.lerp(cellSurface[c00 + lx], cellSurface[c00 + lx + 1], tx);
+                height[column] = (int)math.floor(math.lerp(near, far, tz) + 0.5f) + raise;
+                waterTop[column] = seaTop;
+                flags[column] = cellFlags[cell];
+                return;
+            }
+
             int h = cellHeight[cell];
             float smooth = h;
             if (nx >= 0 && nx < lx)
@@ -475,7 +501,8 @@ public class VoxelArena : MonoBehaviour
                     smooth += math.abs(oz) * d;
             }
 
-            height[column] = (int)math.floor(smooth * k + 0.5f);
+            // Трава на острове — слой над песком: уступ в grassRaise вокселей по краю пятна
+            height[column] = (int)math.floor(smooth * k + 0.5f) + raise;
             waterTop[column] = cellWaterTop[cell] > 0 ? cellWaterTop[cell] * k - waterDrop : 0;
             flags[column] = cellFlags[cell];
         }
@@ -603,6 +630,9 @@ public class VoxelArena : MonoBehaviour
 
         return VoxelToWorld(new float3(x + 0.5f, y + 1, z + 0.5f));
     }
+
+    /// <summary>Поверхность рельефа столбца, как её построила генерация: без деревьев и построек, без воронок</summary>
+    public int GroundY(int x, int z) => columnHeight[z * dims.x + x];
 
     /// <summary>Высота поверхности столбца: y первого пустого вокселя над сплошным (вода — не сплошное)</summary>
     public int SurfaceY(int x, int z)

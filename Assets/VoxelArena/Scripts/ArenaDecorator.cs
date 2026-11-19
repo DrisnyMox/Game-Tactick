@@ -14,8 +14,8 @@ public static class ArenaDecorator
     /// Запускает джобу построек после dependsOn. Координаты всех построек — в клетках раскладки;
     /// клетка пишется кубом cellVoxels³ вокселей
     /// </summary>
-    public static JobHandle Schedule(NativeArray<byte> voxels, int3 dims, int cellVoxels, ArenaLayout layout, ArenaBiome biome,
-        int seed, int wallHeight, JobHandle dependsOn)
+    public static JobHandle Schedule(NativeArray<byte> voxels, int3 dims, int cellVoxels, ArenaLayout layout,
+        NativeArray<int> columnHeight, ArenaBiome biome, int seed, int wallHeight, JobHandle dependsOn)
     {
         return new DecorateJob
         {
@@ -32,6 +32,7 @@ public static class ArenaDecorator
             biome = biome,
             seed = seed,
             wallHeight = wallHeight,
+            columnHeight = columnHeight,
         }.Schedule(dependsOn);
     }
 
@@ -53,6 +54,8 @@ public static class ArenaDecorator
         public ArenaBiome biome;
         public int seed;
         public int wallHeight;
+        // Поверхность рельефа столбцов в вокселях (до построек): от неё встают постройки острова
+        [ReadOnly] public NativeArray<int> columnHeight;
 
         public void Execute()
         {
@@ -75,7 +78,7 @@ public static class ArenaDecorator
                         Cactus(ref writer, root, ref rnd);
                         break;
                     case ArenaBiome.Tropic:
-                        // На пляже пальмы, в глубине острова пальмы, лиственные деревья и кусты
+                        // На песке пальмы, на траве пальмы, лиственные деревья и кусты
                         var at = VoxelRoot(cell);
                         double kind = (flags[cell.y * sizeX + cell.x] & ArenaLayout.FlagSand) != 0 ? 0.0 : rnd.NextDouble();
                         if (kind < 0.45)
@@ -131,9 +134,12 @@ public static class ArenaDecorator
             }
         }
 
-        // Воксель на поверхности посередине клетки раскладки: первый воздух над землёй
-        int3 VoxelRoot(int2 cell) =>
-            new int3(cell.x * cellVoxels + cellVoxels / 2, height[cell.y * sizeX + cell.x] * cellVoxels, cell.y * cellVoxels + cellVoxels / 2);
+        // Воксель на поверхности посередине клетки раскладки: первый воздух над рельефом
+        int3 VoxelRoot(int2 cell)
+        {
+            int x = cell.x * cellVoxels + cellVoxels / 2, z = cell.y * cellVoxels + cellVoxels / 2;
+            return new int3(x, columnHeight[z * dims.x + x], z);
+        }
     }
 
     // Зубцы: два блока через два
@@ -496,12 +502,12 @@ public static class ArenaDecorator
                 w.Set(root + facing * -20 + across * a + new int3(0, y, 0), Tech);
     }
 
-    // Причал: настил 2 м шириной (9 вокселей) от берега на 10 м в воду, вровень с песком, сваи со столбиками,
+    // Причал: настил 2 м шириной (9 вокселей) от берега на 10 м в воду, на воксель выше берега у воды, сваи со столбиками,
     // у настила лодка 4×1,6 м (18×7 вокселей) с ржавым мотором
     static void Landing(ref Writer w, int3 root, int3 facing)
     {
         var across = new int3(-facing.z, 0, facing.x);
-        var deck = root + new int3(0, -1, 0) - across * 4;
+        var deck = root - across * 4;
         for (int t = -4; t <= 44; t++)
         {
             for (int a = 0; a <= 8; a++)

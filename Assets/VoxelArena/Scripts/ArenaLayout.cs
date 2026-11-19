@@ -84,6 +84,22 @@ public sealed class ArenaLayout : IDisposable
     public int waterDropVoxels;
     /// <summary>По воде можно ходить (мелководье архипелага): NavMesh не помечает воду непроходимой</summary>
     public bool wadeableWater;
+    /// <summary>
+    /// На сколько вокселей трава с землёй выше песка: на острове 1 (трава лежит слоем над песком), на арене 0.
+    /// Трава — клетка суши без песка и камня (см. IsRaisedGrass)
+    /// </summary>
+    public int grassRaiseVoxels;
+
+    /// <summary>Клетка поднята на grassRaiseVoxels: сверху трава, а не песок и не камень</summary>
+    public static bool IsRaisedGrass(byte flags, int grassRaise) => grassRaise > 0 && (flags & (FlagSand | FlagRock)) == 0;
+
+    /// <summary>
+    /// Остров: высота поверхности посередине клетки в вокселях, дробная. Между серединами клеток ExpandLayoutJob
+    /// меняет её плавно, поэтому берег поднимается на воксель через несколько вокселей, а не лесенкой.
+    /// Используется, только если fineSurface; height при этом — та же высота в клетках с округлением вниз
+    /// </summary>
+    public NativeArray<float> surface;
+    public bool fineSurface;
 
     public ArenaLayout(int sizeX, int sizeZ)
     {
@@ -93,6 +109,7 @@ public sealed class ArenaLayout : IDisposable
         height = new NativeArray<int>(n, Allocator.Persistent);
         waterTop = new NativeArray<int>(n, Allocator.Persistent);
         flags = new NativeArray<byte>(n, Allocator.Persistent);
+        surface = new NativeArray<float>(n, Allocator.Persistent);
         baseZone = new NativeArray<byte>(n, Allocator.Persistent);
         baseArea = new NativeArray<byte>(n, Allocator.Persistent);
         walls = new NativeList<WallCell>(Allocator.Persistent);
@@ -107,6 +124,7 @@ public sealed class ArenaLayout : IDisposable
         height.Dispose();
         waterTop.Dispose();
         flags.Dispose();
+        surface.Dispose();
         baseZone.Dispose();
         baseArea.Dispose();
         walls.Dispose();
@@ -161,17 +179,17 @@ public static class ArenaLayoutGenerator
         }
     }
 
-    public static ArenaLayout Generate(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ) =>
-        Schedule(settings, biome, sizeX, sizeY, sizeZ).Finish();
+    public static ArenaLayout Generate(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ, int cellVoxels = 2) =>
+        Schedule(settings, biome, sizeX, sizeY, sizeZ, cellVoxels).Finish();
 
     /// <summary>
     /// Запускает джобы раскладки и сразу возвращается. Память джоб — Persistent: раскладку можно ждать
     /// много кадров (экран загрузки), а TempJob живёт не больше четырёх
     /// </summary>
-    public static Pending Schedule(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ)
+    public static Pending Schedule(ArenaGenSettings settings, ArenaBiome biome, int sizeX, int sizeY, int sizeZ, int cellVoxels)
     {
         if (settings.shape == ArenaShape.Island)
-            return IslandLayout.Schedule(settings, sizeX, sizeY, sizeZ);
+            return IslandLayout.Schedule(settings, sizeX, sizeY, sizeZ, cellVoxels);
 
         var layout = new ArenaLayout(sizeX, sizeZ);
         int n = sizeX * sizeZ;
