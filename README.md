@@ -108,6 +108,9 @@ unity command run_script --file Tools/Unity/<Скрипт>.cs --project-path "D:
 
 ## Проверка
 
+Компиляция в открытом редакторе: `Tools\Unity\CheckCompile.ps1` — проект, `Tools\Unity\CheckTools.ps1` — скрипты
+`Tools/Unity` (подробнее в [CLAUDE.md](CLAUDE.md)).
+
 Скрипты `Tools/Unity/Probe*.cs` запускаются в Play тем же `run_script` и печатают замеры:
 
 | Скрипт | Что печатает |

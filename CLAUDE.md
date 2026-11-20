@@ -36,8 +36,15 @@
 
 - Многие пробы читают закрытые поля и методы через рефлексию по имени: `ShooterHud.markerStart`, `KillFeed.lines`, `ArenaNavMesh.seamLinks`, `RaidDirector.ReturnToBase`, `Profile.data` и другие. Перед переименованием ищи имя и в `Tools/Unity`.
 - `Setup*` пишут сериализуемые поля через `SerializedObject.FindProperty("имя")`.
-- Проверка компиляции скрипта без запуска: `unity command run_script --file Tools/Unity/X.cs --dry_run true`.
 - Генератор карты сверяется `ProbeLayoutHash.cs`: хэши для сидов 1, 2, 3, 42 не должны меняться от правок без изменения карты.
+
+## Проверка после правки кода
+
+Нужен открытый Unity Editor с этим проектом. Запуск из корня проекта:
+
+- `powershell -NoProfile -File Tools\Unity\CheckCompile.ps1` — обновляет ассеты (у новых `.cs` появляются `.meta`), перекомпилирует проект и печатает ошибки компиляции. Код выхода 1 — есть ошибки.
+- `powershell -NoProfile -File Tools\Unity\CheckTools.ps1 [Tools/Unity/X.cs ...]` — сухая компиляция скриптов `Tools/Unity` (`run_script --dry_run`, ничего не запускается). Без аргументов проверяет все, это около 5 минут. Нужен после переименований в коде игры. Ссылки через рефлексию так не проверить.
+- В Play: `ProbeLoop.cs`, `ProbeLoopStep.cs`, `ProbeRaidRules.cs` (вылазка). После `editor_play` нужен `editor_focus`, а на время проб — `unity command set_autotick --enabled true`, иначе Editor в фоне почти не идёт.
 
 ## Правила кода
 
