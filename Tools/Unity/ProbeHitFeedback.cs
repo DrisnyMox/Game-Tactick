@@ -125,9 +125,10 @@ public static class ProbeHitFeedback
         if (Physics.Raycast(cam.position, cam.forward, out var h, 100f))
             ray += $" {h.collider.name} ({h.distance:0.0} m, root {h.collider.transform.root.name})";
 
-        float markerStart = (float)typeof(SurvivorShooter).GetField("markerStart", Private).GetValue(shooter);
-        bool head = (bool)typeof(SurvivorShooter).GetField("markerHead", Private).GetValue(shooter);
-        bool kill = (bool)typeof(SurvivorShooter).GetField("markerKill", Private).GetValue(shooter);
+        var hud = typeof(SurvivorShooter).GetField("hud", Private).GetValue(shooter);
+        float markerStart = (float)typeof(ShooterHud).GetField("markerStart", Private).GetValue(hud);
+        bool head = (bool)typeof(ShooterHud).GetField("markerHead", Private).GetValue(hud);
+        bool kill = (bool)typeof(ShooterHud).GetField("markerKill", Private).GetValue(hud);
         var feed = Object.FindFirstObjectByType<KillFeed>();
         var lines = (System.Collections.IList)typeof(KillFeed).GetField("lines", Private).GetValue(feed);
         string text = "";

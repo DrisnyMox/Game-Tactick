@@ -145,10 +145,7 @@ public class SurvivorShooter : MonoBehaviour
     Vector2 recoilApplied;
     // Живой персонаж под прицелом игрока (null - никого): по нему красится прицел
     CharacterHealth aimedCharacter;
-    // Отметка попадания: когда была, в голову ли, убила ли
-    float markerStart = float.NegativeInfinity;
-    bool markerHead;
-    bool markerKill;
+    ShooterHud hud;
 
     public int Ammo => ammo;
     /// <summary>
@@ -171,6 +168,14 @@ public class SurvivorShooter : MonoBehaviour
     /// <summary>Точка у глаз персонажа: из неё целится бот</summary>
     public Vector3 EyePosition => eye.position;
 
+    // Для ShooterHud
+    internal float AimWeight => aimWeight;
+    internal CharacterHealth AimedCharacter => aimedCharacter;
+    internal float CrosshairGap => crosshairGap;
+    internal float CrosshairSize => crosshairSize;
+    internal float CrosshairThickness => crosshairThickness;
+    internal float MarkerTime => markerTime;
+
     void Awake()
     {
         // HUD рисуется только GUI.*, без GUILayout: без раскладки Unity не гоняет OnGUI лишний раз и не выделяет под неё память
@@ -179,6 +184,7 @@ public class SurvivorShooter : MonoBehaviour
         controller = GetComponent<ThirdPersonController>();
         input = GetComponent<StarterAssetsInputs>();
         health = GetComponent<CharacterHealth>();
+        hud = new ShooterHud(this, health);
         ownColliders = GetComponentsInChildren<Collider>(true);
         eye = controller.CinemachineCameraTarget.transform;
 
@@ -363,7 +369,7 @@ public class SurvivorShooter : MonoBehaviour
         // Во время перезарядки левая рука работает по анимации Reload_Rifle
         float gripWeight = Reloading ? 0f : 1f;
         if (gripWeight > 0f)
-            SolveTwoBoneIK(leftUpperArm, leftLowerArm, leftHand, weapon.LeftHandGrip.position, gripWeight);
+            TwoBoneIK.Solve(leftUpperArm, leftLowerArm, leftHand, weapon.LeftHandGrip.position, gripWeight);
     }
 
     /// <summary>Полный магазин, перезарядка прервана (возрождение)</summary>
@@ -481,9 +487,7 @@ public class SurvivorShooter : MonoBehaviour
 
     void ShowHitMarker(bool head, bool kill)
     {
-        markerStart = Time.time;
-        markerHead = head;
-        markerKill = kill;
+        hud.ShowHitMarker(head, kill);
         weapon.Audio.PlayOneShot(kill ? killMarkerClip : head ? headshotMarkerClip : hitMarkerClip, markerVolume);
     }
 
@@ -511,120 +515,6 @@ public class SurvivorShooter : MonoBehaviour
     // Больше 64 коллайдеров на одном луче не бывает: дальность луча - range, а на нём земля, стены и пара тел
     static readonly RaycastHit[] RayHits = new RaycastHit[64];
 
-    /// <summary>
-    /// IK на две кости: кисть тянется к цели, локоть сгибается в ту же сторону, что в анимации.
-    /// Поворот кисти остаётся из анимации.
-    /// </summary>
-    static void SolveTwoBoneIK(Transform upper, Transform lower, Transform end, Vector3 target, float weight)
-    {
-        Vector3 a = upper.position, b = lower.position, c = end.position;
-        Vector3 t = Vector3.Lerp(c, target, weight);
-        float lab = (b - a).magnitude, lcb = (c - b).magnitude;
-        float lat = Mathf.Clamp((t - a).magnitude, 0.001f, lab + lcb - 0.001f);
-
-        float acAb0 = Angle(c - a, b - a);
-        float baBc0 = Angle(a - b, c - b);
-        float acAb1 = Mathf.Acos(Mathf.Clamp((lcb * lcb - lab * lab - lat * lat) / (-2f * lab * lat), -1f, 1f));
-        float baBc1 = Mathf.Acos(Mathf.Clamp((lat * lat - lab * lab - lcb * lcb) / (-2f * lab * lcb), -1f, 1f));
-
-        var bend = Vector3.Cross(c - a, b - a);
-        if (bend.sqrMagnitude < 1e-8f)
-            bend = Vector3.Cross(c - a, upper.up);
-        bend.Normalize();
-
-        lower.rotation = Quaternion.AngleAxis((baBc1 - baBc0) * Mathf.Rad2Deg, bend) * lower.rotation;
-        upper.rotation = Quaternion.AngleAxis((acAb1 - acAb0) * Mathf.Rad2Deg, bend) * upper.rotation;
-
-        // Теперь длина от плеча до кисти верная, осталось довернуть руку на цель
-        c = end.position;
-        upper.rotation = Quaternion.FromToRotation(c - a, t - a) * upper.rotation;
-    }
-
-    static float Angle(Vector3 x, Vector3 y)
-    {
-        return Mathf.Acos(Mathf.Clamp(Vector3.Dot(x.normalized, y.normalized), -1f, 1f));
-    }
-
-    // Крест прицела: размер растёт с высотой экрана (crosshairSize задан для 1080 пикселей), тёмная обводка
-    // видна на светлом песке. Под прицелом враг - красный, союзник - синий, иначе белый
-    void DrawCrosshair()
-    {
-        var center = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        float scale = Screen.height / 1080f;
-        float gap = crosshairGap * scale, len = crosshairSize * scale, thick = Mathf.Max(2f, crosshairThickness * scale);
-        var color = aimedCharacter == null ? Color.white
-            : aimedCharacter.Team == health.Team ? new Color(0.45f, 0.7f, 1f) : new Color(1f, 0.25f, 0.2f);
-
-        for (int pass = 0; pass < 2; pass++)
-        {
-            // Первый проход - обводка на пиксель шире со всех сторон, второй - сам крест
-            float o = pass == 0 ? 1f : 0f;
-            GUI.color = pass == 0 ? new Color(0f, 0f, 0f, 0.6f) : color;
-            GUI.DrawTexture(new Rect(center.x - gap - len - o, center.y - thick * 0.5f - o, len + 2 * o, thick + 2 * o), Texture2D.whiteTexture);
-            GUI.DrawTexture(new Rect(center.x + gap - o, center.y - thick * 0.5f - o, len + 2 * o, thick + 2 * o), Texture2D.whiteTexture);
-            GUI.DrawTexture(new Rect(center.x - thick * 0.5f - o, center.y - gap - len - o, thick + 2 * o, len + 2 * o), Texture2D.whiteTexture);
-            GUI.DrawTexture(new Rect(center.x - thick * 0.5f - o, center.y + gap - o, thick + 2 * o, len + 2 * o), Texture2D.whiteTexture);
-        }
-        GUI.color = Color.white;
-    }
-
-    // Косой крестик вокруг прицела после попадания во врага: белый, в голову - оранжевый,
-    // убийство - красный и крупнее. Гаснет за markerTime
-    void DrawHitMarker()
-    {
-        float t = (Time.time - markerStart) / markerTime;
-        if (t >= 1f)
-            return;
-
-        // Отметка стоит снаружи обычного прицела (у него 4 + 9 пикселей от центра), иначе с ним сливается
-        var center = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        float scale = Mathf.Max(1f, Screen.height / 1080f) * (markerKill ? 1.4f : 1f);
-        float gap = 16f * scale, len = 14f * scale, thick = 3f * scale;
-        var color = markerKill ? new Color(1f, 0.2f, 0.15f) : markerHead ? new Color(1f, 0.6f, 0.1f) : Color.white;
-        color.a = 1f - t * t;
-
-        var matrix = GUI.matrix;
-        GUI.color = color;
-        GUIUtility.RotateAroundPivot(45f, center);
-        GUI.DrawTexture(new Rect(center.x - gap - len, center.y - thick * 0.5f, len, thick), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(center.x + gap, center.y - thick * 0.5f, len, thick), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(center.x - thick * 0.5f, center.y - gap - len, thick, len), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(center.x - thick * 0.5f, center.y + gap, thick, len), Texture2D.whiteTexture);
-        GUI.matrix = matrix;
-        GUI.color = Color.white;
-    }
-
-    // Красная стрелка на кольце вокруг прицела: показывает, откуда прилетела последняя пуля. Гаснет за секунду
-    void DrawDamageArrow()
-    {
-        float t = Time.time - health.LastHitTime;
-        if (t >= 1f)
-            return;
-
-        var forward = cam.forward;
-        forward.y = 0f;
-        var toShooter = health.LastHitFrom - transform.position;
-        toShooter.y = 0f;
-        float angle = Vector3.SignedAngle(forward, toShooter, Vector3.up);
-
-        var center = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-        float size = Screen.height * 0.06f, radius = Screen.height * 0.16f;
-        arrowStyle.fontSize = Mathf.RoundToInt(size);
-        arrowStyle.normal.textColor = new Color(1f, 0.15f, 0.1f, 1f - t);
-
-        var matrix = GUI.matrix;
-        GUIUtility.RotateAroundPivot(angle, center);
-        GUI.Label(new Rect(center.x - size, center.y - radius - size, size * 2f, size * 2f), "▲", arrowStyle);
-        GUI.matrix = matrix;
-    }
-
-    // Стили и строки HUD. OnGUI зовётся по нескольку раз за кадр, и новый GUIStyle или новая строка в каждом вызове
-    // выделяли бы память. Стили заводятся в первом OnGUI игрока (GUI.skin есть только внутри OnGUI), строка патронов
-    // и строка здоровья собираются заново, только когда меняется число
-    GUIStyle hudStyle, arrowStyle;
-    string ammoText, healthText;
-    int shownAmmo = -1, shownReserve = -1, shownHealth = -1;
-
     void OnGUI()
     {
         // OnGUI рисуется поверх любого Canvas: под экраном загрузки и меню настроек надписи не нужны
@@ -632,47 +522,6 @@ public class SurvivorShooter : MonoBehaviour
             return;
         if (botControlled)
             return;
-        if (hudStyle == null)
-        {
-            hudStyle = new GUIStyle(GUI.skin.label);
-            arrowStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter };
-        }
-
-        // Попали в игрока: экран на миг краснеет
-        float hitFlash = 1f - (Time.time - health.LastHitTime) / 0.35f;
-        if (hitFlash > 0f)
-        {
-            GUI.color = new Color(0.8f, 0f, 0f, 0.35f * hitFlash);
-            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
-            GUI.color = Color.white;
-        }
-
-        if (aimWeight > 0.5f)
-            DrawCrosshair();
-
-        DrawHitMarker();
-        DrawDamageArrow();
-
-        // Справа от магазина — запас в рюкзаке, а без запаса — размер магазина
-        int reserve = Reserve == null ? magazineSize : Reserve.Reserve;
-        if (ammo != shownAmmo || reserve != shownReserve)
-        {
-            shownAmmo = ammo;
-            shownReserve = reserve;
-            ammoText = $"{ammo} / {reserve}";
-        }
-        int hp = Mathf.CeilToInt(health.Health);
-        if (hp != shownHealth)
-        {
-            shownHealth = hp;
-            healthText = $"здоровье {hp}";
-        }
-
-        hudStyle.fontSize = Mathf.Clamp(Screen.height / 30, 12, 32);
-        hudStyle.alignment = TextAnchor.LowerRight;
-        GUI.Label(new Rect(0, 0, Screen.width - 20, Screen.height - 20), Reloading ? "перезарядка..." : ammoText, hudStyle);
-
-        hudStyle.alignment = TextAnchor.LowerLeft;
-        GUI.Label(new Rect(20, 0, Screen.width, Screen.height - 20), healthText, hudStyle);
+        hud.Draw(cam);
     }
 }
