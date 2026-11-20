@@ -16,8 +16,8 @@ using UnityEngine.InputSystem;
 ///  * пуля - луч из центра экрана; если между дулом и целью что-то есть, попадает в это;
 ///  * камера при прицеливании подъезжает к плечу через CinemachineThirdPersonFollow.
 /// Ввод как у StarterAssetsInputs: действия Aim, Fire, Reload в StarterAssets.inputactions,
-/// PlayerInput присылает их сообщениями OnAim, OnFire, OnReload и они ложатся в поля AimInput, FireInput, ReloadInput.
-/// У бота (botControlled) поля ввода и AimTarget ставит ShooterBot, а пуля летит из глаз в AimTarget.
+/// PlayerInput присылает их сообщениями OnAim, OnFire, OnReload и они ложатся в свойства AimInput, FireInput, ReloadInput.
+/// У бота (botControlled) свойства ввода и AimTarget ставит ShooterBot, а пуля летит из глаз в AimTarget.
 /// Компонент и все ссылки ставит Tools/Unity/SetupSurvivorShooter.cs, бота - Tools/Unity/SetupArenaBot.cs.
 /// </summary>
 // Update идёт после Update у ThirdPersonController: поворот к камере перекрывает его поворот по ходу движения.
@@ -33,20 +33,19 @@ public class SurvivorShooter : MonoBehaviour
     static readonly int AimXId = Animator.StringToHash("AimX");
     static readonly int AimYId = Animator.StringToHash("AimY");
 
-    [Header("Ввод (ставит PlayerInput)")]
-    [Tooltip("Прицел зажат")]
-    public bool AimInput;
-    [Tooltip("Огонь зажат")]
-    public bool FireInput;
-    [Tooltip("Нажата перезарядка; Update сбрасывает, когда начнёт её")]
-    public bool ReloadInput;
+    /// <summary>Прицел зажат (ставит PlayerInput или ShooterBot)</summary>
+    public bool AimInput { get; set; }
+    /// <summary>Огонь зажат (ставит PlayerInput или ShooterBot)</summary>
+    public bool FireInput { get; set; }
+    /// <summary>Нажата перезарядка; Update сбрасывает, когда начнёт её</summary>
+    public bool ReloadInput { get; set; }
+    /// <summary>Куда целится бот (ставит ShooterBot)</summary>
+    public Vector3 AimTarget { get; set; }
 
     [Header("Бот")]
     [Tooltip("Стрелком управляет ShooterBot: целится из глаз (PlayerCameraRoot) в AimTarget, а не из камеры " +
              "в центр экрана, камеру к плечу не двигает и ничего не рисует на экране")]
     [SerializeField] bool botControlled;
-    [Tooltip("Куда целится бот (ставит ShooterBot)")]
-    public Vector3 AimTarget;
 
     [Header("Винтовка")]
     [SerializeField] ShooterWeapon weaponPrefab;
@@ -451,8 +450,8 @@ public class SurvivorShooter : MonoBehaviour
             index = ImpactIndex(HitSurface.Default);
         var entry = impacts[index];
 
-        var effect = Instantiate(entry.effect, hit.point, Quaternion.LookRotation(hit.normal));
-        if (!Mathf.Approximately(entry.scale, 1f))
+        var effect = Instantiate(entry.Effect, hit.point, Quaternion.LookRotation(hit.normal));
+        if (!Mathf.Approximately(entry.Scale, 1f))
         {
             // У частиц Invector режим Shape: масштаб объекта меняет только область вылета, а не размер частиц
             effect.GetComponentsInChildren(EffectParticles);
@@ -461,18 +460,18 @@ public class SurvivorShooter : MonoBehaviour
                 var main = particles.main;
                 main.scalingMode = ParticleSystemScalingMode.Hierarchy;
             }
-            effect.transform.localScale *= entry.scale;
+            effect.transform.localScale *= entry.Scale;
         }
         Destroy(effect, impactLifetime);
-        if (entry.sounds.Length > 0)
-            AudioSource.PlayClipAtPoint(entry.sounds[Random.Range(0, entry.sounds.Length)], hit.point, entry.volume);
+        if (entry.Sounds.Length > 0)
+            AudioSource.PlayClipAtPoint(entry.Sounds[Random.Range(0, entry.Sounds.Length)], hit.point, entry.Volume);
     }
 
     // Строка impacts для вида поверхности или -1. Циклом, а не Array.FindIndex с лямбдой: лямбда с захватом выделяет память
     int ImpactIndex(HitSurface surface)
     {
         for (int i = 0; i < impacts.Length; i++)
-            if (impacts[i].surface == surface)
+            if (impacts[i].Surface == surface)
                 return i;
         return -1;
     }

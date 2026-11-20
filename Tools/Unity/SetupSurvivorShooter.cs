@@ -179,8 +179,8 @@ public static class SetupSurvivorShooter
 
         var weapon = rifle.AddComponent<ShooterWeapon>();
         var so = new SerializedObject(weapon);
-        so.FindProperty("Muzzle").objectReferenceValue = renderer.Find("muzzle");
-        so.FindProperty("LeftHandGrip").objectReferenceValue = renderer.Find("leftHandIK");
+        so.FindProperty("muzzle").objectReferenceValue = renderer.Find("muzzle");
+        so.FindProperty("leftHandGrip").objectReferenceValue = renderer.Find("leftHandIK");
         var muzzleParticles = particles.GetComponentsInChildren<ParticleSystem>(true).Where(p => !p.name.StartsWith("Capsule")).ToArray();
         var list = so.FindProperty("muzzleParticles");
         list.arraySize = muzzleParticles.Length;

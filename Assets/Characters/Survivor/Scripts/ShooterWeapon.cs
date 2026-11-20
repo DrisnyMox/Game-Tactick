@@ -1,4 +1,5 @@
 ﻿using UnityEngine;
+using UnityEngine.Serialization;
 
 /// <summary>
 /// Винтовка выжившего: точки на модели и эффекты выстрела.
@@ -8,10 +9,12 @@
 public class ShooterWeapon : MonoBehaviour
 {
     [Tooltip("Точка дула: от неё летит пуля")]
-    public Transform Muzzle;
+    [FormerlySerializedAs("Muzzle")]
+    [SerializeField] Transform muzzle;
 
     [Tooltip("Точка на цевье, куда SurvivorShooter ставит левую ладонь")]
-    public Transform LeftHandGrip;
+    [FormerlySerializedAs("LeftHandGrip")]
+    [SerializeField] Transform leftHandGrip;
 
     [Tooltip("Вспышка и дым у дула: перезапускаются на каждый выстрел")]
     [SerializeField] ParticleSystem[] muzzleParticles;
@@ -28,6 +31,8 @@ public class ShooterWeapon : MonoBehaviour
 
     float flashUntil;
 
+    public Transform Muzzle => muzzle;
+    public Transform LeftHandGrip => leftHandGrip;
     public AudioSource Audio => audioSource;
 
     void Awake()

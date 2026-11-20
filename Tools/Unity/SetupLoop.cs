@@ -233,7 +233,7 @@ public static class SetupLoop
         var stations = new List<BaseStation>();
 
         // Склад: штабель ящиков и железный сундук
-        var stash = Station(root, "Stash", BaseStation.Kind.Stash, new Vector3(-8f, 0f, 0f), 90f);
+        var stash = Station(root, "Stash", BaseStation.StationKind.Stash, new Vector3(-8f, 0f, 0f), 90f);
         Box(stash, "Crate A", m["Wood"], new Vector3(-0.8f, 0.6f, 1.2f), Vector3.one * 1.2f);
         Box(stash, "Crate B", m["DarkWood"], new Vector3(0.6f, 0.5f, 1.4f), Vector3.one * 1f);
         Box(stash, "Crate C", m["Wood"], new Vector3(-0.6f, 1.7f, 1.3f), Vector3.one * 0.9f, 15f);
@@ -241,7 +241,7 @@ public static class SetupLoop
         stations.Add(stash.GetComponent<BaseStation>());
 
         // Торговец: прилавок под навесом
-        var trader = Station(root, "Trader", BaseStation.Kind.Trader, new Vector3(8f, 0f, 0f), -90f);
+        var trader = Station(root, "Trader", BaseStation.StationKind.Trader, new Vector3(8f, 0f, 0f), -90f);
         Box(trader, "Counter", m["Wood"], new Vector3(0f, 0.5f, 1.2f), new Vector3(3f, 1f, 1f));
         Box(trader, "Roof", m["Cloth"], new Vector3(0f, 2.5f, 1.6f), new Vector3(3.6f, 0.12f, 2.4f));
         foreach (float x in new[] { -1.6f, 1.6f })
@@ -252,7 +252,7 @@ public static class SetupLoop
         stations.Add(trader.GetComponent<BaseStation>());
 
         // Верстак: стол, тиски, наковальня
-        var bench = Station(root, "Workbench", BaseStation.Kind.Workbench, new Vector3(0f, 0f, -8f), 0f);
+        var bench = Station(root, "Workbench", BaseStation.StationKind.Workbench, new Vector3(0f, 0f, -8f), 0f);
         Box(bench, "Table", m["Wood"], new Vector3(0f, 0.45f, -1.2f), new Vector3(2.6f, 0.9f, 1.2f));
         Box(bench, "Vise", m["Metal"], new Vector3(-0.8f, 1.05f, -1.2f), new Vector3(0.3f, 0.3f, 0.5f));
         Box(bench, "Anvil", m["Metal"], new Vector3(1.9f, 0.4f, -1.1f), new Vector3(0.5f, 0.8f, 0.9f));
@@ -264,7 +264,7 @@ public static class SetupLoop
         foreach (float z in new[] { 20f, 25f, 30f })
             foreach (float x in new[] { -1.4f, 1.4f })
                 Box(root, "Pile", m["DarkWood"], new Vector3(x, -0.6f, z), new Vector3(0.25f, 1.2f, 0.25f));
-        var exit = Station(root, "Exit", BaseStation.Kind.Exit, new Vector3(0f, 0f, 30f), 0f);
+        var exit = Station(root, "Exit", BaseStation.StationKind.Exit, new Vector3(0f, 0f, 30f), 0f);
         var boat = Box(exit, "Boat", m["DarkWood"], new Vector3(2.8f, -0.3f, 0f), new Vector3(1.8f, 0.7f, 4.5f));
         Object.DestroyImmediate(boat.GetComponent<Collider>());
         Box(exit, "Mast", m["DarkWood"], new Vector3(-1.2f, 1.2f, 1.5f), new Vector3(0.12f, 2.4f, 0.12f));
@@ -282,11 +282,13 @@ public static class SetupLoop
         return stations;
     }
 
-    static Transform Station(Transform root, string name, BaseStation.Kind kind, Vector3 position, float yaw)
+    static Transform Station(Transform root, string name, BaseStation.StationKind kind, Vector3 position, float yaw)
     {
         var station = new GameObject(name).AddComponent<BaseStation>();
-        station.kind = kind;
-        station.reach = 3f;
+        var so = new SerializedObject(station);
+        so.FindProperty("kind").enumValueIndex = (int)kind;
+        so.FindProperty("reach").floatValue = 3f;
+        so.ApplyModifiedPropertiesWithoutUndo();
         station.transform.SetParent(root, false);
         station.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(0f, yaw, 0f));
         return station.transform;

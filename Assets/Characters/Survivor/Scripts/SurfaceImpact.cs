@@ -5,12 +5,18 @@ using UnityEngine;
 [Serializable]
 public struct SurfaceImpact
 {
-    public HitSurface surface;
+    [SerializeField] HitSurface surface;
     [Tooltip("Префаб эффекта в точке попадания: живёт impactLifetime секунд")]
-    public GameObject effect;
+    [SerializeField] GameObject effect;
     [Tooltip("Масштаб эффекта: 1 - как в префабе")]
-    public float scale;
+    [SerializeField] float scale;
     [Tooltip("Звук попадания: каждый раз случайный из списка, звучит в точке попадания")]
-    public AudioClip[] sounds;
-    [Range(0f, 1f)] public float volume;
+    [SerializeField] AudioClip[] sounds;
+    [Range(0f, 1f)] [SerializeField] float volume;
+
+    public HitSurface Surface => surface;
+    public GameObject Effect => effect;
+    public float Scale => scale;
+    public AudioClip[] Sounds => sounds;
+    public float Volume => volume;
 }

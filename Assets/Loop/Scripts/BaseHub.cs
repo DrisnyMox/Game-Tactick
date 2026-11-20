@@ -47,7 +47,7 @@ public class BaseHub : MonoBehaviour
         foreach (var station in stations)
         {
             float d = Vector3.Distance(Flat(station.transform.position), Flat(player.transform.position));
-            if (d <= station.reach && d < best)
+            if (d <= station.Reach && d < best)
             {
                 best = d;
                 near = station;
@@ -123,18 +123,18 @@ public class BaseHub : MonoBehaviour
         GUILayout.BeginArea(new Rect(rect.x + font, rect.y + font * 0.6f, w - font * 2, h - font * 1.2f));
         GUILayout.Label(open.Title, title);
         scroll = GUILayout.BeginScrollView(scroll);
-        switch (open.kind)
+        switch (open.Kind)
         {
-            case BaseStation.Kind.Stash:
+            case BaseStation.StationKind.Stash:
                 DrawStash();
                 break;
-            case BaseStation.Kind.Trader:
+            case BaseStation.StationKind.Trader:
                 DrawTrader();
                 break;
-            case BaseStation.Kind.Workbench:
+            case BaseStation.StationKind.Workbench:
                 DrawWorkbench();
                 break;
-            case BaseStation.Kind.Exit:
+            case BaseStation.StationKind.Exit:
                 DrawExit();
                 break;
         }
