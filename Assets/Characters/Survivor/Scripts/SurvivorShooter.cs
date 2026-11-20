@@ -209,13 +209,7 @@ public class SurvivorShooter : MonoBehaviour
             return;
         }
 
-        if (followCamera == null)
-        {
-            Debug.LogError($"[SurvivorShooter] {name}: не задана камера Follow Camera (CinemachineThirdPersonFollow " +
-                           "на PlayerFollowCamera). Без неё камера не подъезжает к плечу при прицеливании. " +
-                           "Перетащи PlayerFollowCamera в поле Follow Camera или запусти Tools/Unity/SetupSurvivorShooter.cs.", this);
-            return;
-        }
+        // У игрока камера обязательна: её ставит Tools/Unity/SetupSurvivorShooter.cs
         defaultCameraDistance = followCamera.CameraDistance;
         defaultShoulderOffset = followCamera.ShoulderOffset;
         defaultCameraSide = followCamera.CameraSide;
@@ -305,7 +299,7 @@ public class SurvivorShooter : MonoBehaviour
             }
         }
 
-        if (followCamera != null)
+        if (!botControlled)
         {
             followCamera.CameraDistance = Mathf.Lerp(defaultCameraDistance, aimCameraDistance, aimWeight);
             followCamera.ShoulderOffset = Vector3.Lerp(defaultShoulderOffset, aimShoulderOffset, aimWeight);
