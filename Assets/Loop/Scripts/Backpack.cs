@@ -1,14 +1,6 @@
 using System;
 using UnityEngine;
 
-/// <summary>Откуда перезарядка берёт патроны. Нет запаса (SurvivorShooter.Reserve == null) — патроны бесконечные</summary>
-public interface IAmmoReserve
-{
-    int Reserve { get; }
-    /// <summary>Забрать до count патронов, вернуть сколько забрано</summary>
-    int TakeAmmo(int count);
-}
-
 /// <summary>
 /// Рюкзак персонажа на вылазке: материалы, снаряжение, чертежи.
 /// Материалы весят по Items.Weight, их общий вес не больше capacity; снаряжение и чертежи места не занимают.

@@ -5,13 +5,6 @@ using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 
-/// <summary>Меш чанка в узле: номер в chunkMeshes и сдвиг его вершин внутри узла (в вокселях)</summary>
-public struct NodePart
-{
-    public int mesh;
-    public float3 offset;
-}
-
 /// <summary>
 /// Склеивает узлы отрисовки из мешей отрисовки их чанков и пишет прямо в Mesh.MeshDataArray.
 /// У меша чанка и узла одни и те же потоки вершин (позиция, нормаль, цвет) и два сабмеша:
