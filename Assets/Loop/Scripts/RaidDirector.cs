@@ -17,10 +17,10 @@ using UnityEngine.SceneManagement;
 /// Во время вылазки: выпавший рюкзак становится мешком (Pickup) на месте; уничтоженный или эвакуированный
 /// рейдер через raiderRespawnDelay выходит на карту новым, с пустым рюкзаком. H — аптечка. Бег игрока шумит (Noise).
 /// Игрок эвакуировался — рюкзак уходит на склад (Profile.Extract), уничтожен — рюкзак потерян, кроме защищённого
-/// кармана (PocketOf, Profile.Lose).
+/// кармана (ProtectedPocket, Profile.Lose).
 /// Итог на экране, затем сцена Base.
 ///
-/// HUD: метки эвакуации с расстоянием, отсчёт в круге, рюкзак, подписи добычи, всплывающие «+1 Дерево».
+/// HUD рисует RaidHud, места добычи рейдеров — RaidGatherSpots.
 /// Компонент и ссылки ставит Tools/Unity/SetupRaid.cs.
 /// </summary>
 [RequireComponent(typeof(VoxelArena))]
@@ -56,26 +56,21 @@ public class RaidDirector : MonoBehaviour
 
     enum State { Playing, Extracted, Lost }
 
-    struct GatherSpot
-    {
-        public int3 min, max;
-    }
-
     VoxelArena arena;
     Backpack playerBackpack;
     SurvivorShooter playerShooter;
     StarterAssets.StarterAssetsInputs playerInput;
     CharacterController playerController;
+    RaidHud hud;
     float nextStepNoise;
-    // Игрок шумел (выстрел или бег): HUD показывает «шум» до этого времени
-    float noisyUntil;
     readonly List<CharacterHealth> raiders = new();
     readonly Dictionary<CharacterHealth, float> respawnTimes = new();
     readonly List<CharacterHealth> due = new();
     // Сколько патронов кладёт отладочная клавиша P
     const int DebugAmmo = 100;
+    // Игрок уничтожен: итог через столько секунд, когда тело уже упало
+    const float LostSummaryDelay = 2.5f;
 
-    readonly List<GatherSpot> gatherSpots = new();
     // Клетки раскладки, где можно выйти на карту: суша без воды, деревьев и камней, вне баз
     readonly List<int2> spawnCells = new();
     ItemCounts playerDrop;
@@ -87,6 +82,9 @@ public class RaidDirector : MonoBehaviour
     // По мелководью архипелага (1–3 вокселя воды) ходить можно, глубже — нет
     const int maxWadeVoxels = 4;
 
+    /// <summary>Места добычи рейдеров на этой карте</summary>
+    public RaidGatherSpots GatherSpots { get; private set; }
+
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
     static void ResetStatics() => Current = null;
 
@@ -95,6 +93,7 @@ public class RaidDirector : MonoBehaviour
         Current = this;
         useGUILayout = false;
         arena = GetComponent<VoxelArena>();
+        GatherSpots = new RaidGatherSpots(arena);
         // Каждая вылазка — новая карта. Сид ставится до VoxelArena.Start, где начинается генерация
         arena.Seed = UnityEngine.Random.Range(1, int.MaxValue);
         arena.Generated += Arena_Generated;
@@ -108,6 +107,7 @@ public class RaidDirector : MonoBehaviour
         playerShooter = player.GetComponent<SurvivorShooter>();
         playerInput = player.GetComponent<StarterAssets.StarterAssetsInputs>();
         playerController = player.GetComponent<CharacterController>();
+        hud = new RaidHud(player, playerBackpack, pocketMaterials);
         playerBackpack.Gained += PlayerBackpack_Gained;
         Noise.Made += Noise_Made;
         player.Died += Player_Died;
@@ -148,8 +148,7 @@ public class RaidDirector : MonoBehaviour
     void Arena_Generated()
     {
         var layout = arena.Layout;
-        int k = arena.CellVoxels;
-        CollectGatherSpots(layout, k);
+        GatherSpots.Collect(layout);
         CollectSpawnCells(layout);
 
         // Игрок — на базе один лицом к воротам
@@ -176,7 +175,7 @@ public class RaidDirector : MonoBehaviour
             else if (resource.kind == ResourceKind.CapturePoint)
                 exitCandidates.Add(arena.CellTop(resource.cell));
             else
-                crates.Add(SiteFloor(layout, resource));
+                crates.Add(SiteFloor(resource));
         }
         if (island)
             AddSandCrates(layout, crates);
@@ -245,20 +244,10 @@ public class RaidDirector : MonoBehaviour
     }
 
     // Пол посередине руин или палуба остова: обе постройки стоят центром на точке
-    Vector3 SiteFloor(ArenaLayout layout, ResourcePoint site)
+    Vector3 SiteFloor(ResourcePoint site)
     {
-        return arena.VoxelToWorld(SiteRoot(layout, site.cell) + new float3(0.5f, 0f, 0.5f));
+        return arena.VoxelToWorld(RaidGatherSpots.SiteRoot(arena, site.cell) + new float3(0.5f, 0f, 0.5f));
     }
-
-    // Воксель на поверхности посередине клетки: от него ArenaDecorator строит постройки острова
-    int3 SiteRoot(ArenaLayout layout, int2 cell)
-    {
-        int k = arena.CellVoxels;
-        int x = cell.x * k + k / 2, z = cell.y * k + k / 2;
-        return new int3(x, arena.GroundY(x, z), z);
-    }
-
-    static GatherSpot Box(int3 root, int3 min, int3 max) => new GatherSpot { min = root + min, max = root + max };
 
     // Океан за краем карты: четыре полосы на уровне воды вокруг арены. Внутри карты их нет:
     // сквозь воду мелководья видно песчаное дно
@@ -284,44 +273,6 @@ public class RaidDirector : MonoBehaviour
         var renderer = strip.GetComponent<MeshRenderer>();
         renderer.sharedMaterial = oceanMaterial;
         renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-    }
-
-    // Деревья, камни, рудные бугры, руины и остовы: боксы вокселей, где рейдеры добывают. Причалы не трогают.
-    // На острове постройки в вокселях (ArenaDecorator): у деревьев низ ствола до 2,3 м, где пальма ещё не клонится,
-    // руины 27×19 со стенами 14, остов до 25 вокселей от центра в любую сторону
-    void CollectGatherSpots(ArenaLayout layout, int k)
-    {
-        gatherSpots.Clear();
-        bool island = layout.wadeableWater;
-        foreach (var cell in layout.trees)
-        {
-            int h = layout.height[cell.y * layout.sizeX + cell.x];
-            gatherSpots.Add(island
-                ? Box(SiteRoot(layout, cell), new int3(-2, 0, -2), new int3(4, 10, 4))
-                : new GatherSpot { min = new int3((cell.x - 2) * k, h * k, (cell.y - 2) * k), max = new int3((cell.x + 3) * k, (h + 8) * k, (cell.y + 3) * k) });
-        }
-        foreach (var cell in layout.rocks)
-        {
-            int h = layout.height[cell.y * layout.sizeX + cell.x];
-            gatherSpots.Add(new GatherSpot { min = new int3((cell.x - 3) * k, h * k, (cell.y - 3) * k), max = new int3((cell.x + 4) * k, (h + 4) * k, (cell.y + 4) * k) });
-        }
-        foreach (var resource in layout.resources)
-        {
-            var cell = resource.cell;
-            int h = layout.height[cell.y * layout.sizeX + cell.x];
-            switch (resource.kind)
-            {
-                case ResourceKind.CapturePoint:
-                    gatherSpots.Add(new GatherSpot { min = new int3((cell.x - 2) * k, (h - 1) * k, (cell.y - 2) * k), max = new int3((cell.x + 3) * k, h * k, (cell.y + 3) * k) });
-                    break;
-                case ResourceKind.Ruin:
-                    gatherSpots.Add(Box(SiteRoot(layout, cell), new int3(-13, 0, -9), new int3(14, 15, 10)));
-                    break;
-                case ResourceKind.Wreck:
-                    gatherSpots.Add(Box(SiteRoot(layout, cell), new int3(-25, -2, -25), new int3(26, 19, 26)));
-                    break;
-            }
-        }
     }
 
     // Клетки, где голая земля: поверхность столбца на высоте раскладки (нет дерева или камня сверху), не вода,
@@ -387,61 +338,6 @@ public class RaidDirector : MonoBehaviour
         return best;
     }
 
-    const int NearSpots = 5;
-    readonly int[] nearSpot = new int[NearSpots];
-    readonly long[] nearDistance = new long[NearSpots];
-
-    /// <summary>Случайное место добычи из 5 ближайших к from; -1 — мест не осталось</summary>
-    public int RandomNearGatherSpot(Vector3 from)
-    {
-        if (gatherSpots.Count == 0)
-            return -1;
-        var voxel = (int3)math.floor(arena.WorldToVoxel(from));
-        int found = 0;
-        for (int i = 0; i < gatherSpots.Count; i++)
-        {
-            var d3 = (gatherSpots[i].min + gatherSpots[i].max) / 2 - voxel;
-            long d = (long)d3.x * d3.x + (long)d3.z * d3.z;
-            // Короткий список ближайших по возрастанию: новое место встаёт на своё место, последнее выпадает
-            if (found == NearSpots && d >= nearDistance[NearSpots - 1])
-                continue;
-            int slot = found < NearSpots ? found++ : NearSpots - 1;
-            while (slot > 0 && nearDistance[slot - 1] > d)
-            {
-                nearSpot[slot] = nearSpot[slot - 1];
-                nearDistance[slot] = nearDistance[slot - 1];
-                slot--;
-            }
-            nearSpot[slot] = i;
-            nearDistance[slot] = d;
-        }
-        return nearSpot[UnityEngine.Random.Range(0, found)];
-    }
-
-    /// <summary>Верхний воксель-материал в месте добычи (в него стреляет рейдер); false — всё выбито</summary>
-    public bool GatherTarget(int spot, out Vector3 point)
-    {
-        var box = gatherSpots[spot];
-        for (int y = box.max.y - 1; y >= box.min.y; y--)
-            for (int z = box.min.z; z < box.max.z; z++)
-                for (int x = box.min.x; x < box.max.x; x++)
-                {
-                    if (!Items.FromBlock(arena.GetBlock(new int3(x, y, z)), out _))
-                        continue;
-                    point = arena.VoxelToWorld(new float3(x + 0.5f, y + 0.5f, z + 0.5f));
-                    return true;
-                }
-        point = default;
-        return false;
-    }
-
-    /// <summary>Место выбито: убрать из списка (последнее встаёт на его номер)</summary>
-    public void RemoveGatherSpot(int spot)
-    {
-        gatherSpots[spot] = gatherSpots[^1];
-        gatherSpots.RemoveAt(gatherSpots.Count - 1);
-    }
-
     // Верх земли под точкой: луч сверху по слою Default (арена)
     Vector3 Ground(Vector3 point)
     {
@@ -450,7 +346,7 @@ public class RaidDirector : MonoBehaviour
         return point;
     }
 
-    static Vector3 Flat(Vector3 v) => new(v.x, 0f, v.z);
+    internal static Vector3 Flat(Vector3 v) => new(v.x, 0f, v.z);
 
     static void Shuffle<T>(List<T> list)
     {
@@ -468,45 +364,13 @@ public class RaidDirector : MonoBehaviour
         // Защищённый карман игрока остаётся с ним, на землю падает остальное
         if (backpack.Owner == player)
         {
-            playerKept = PocketOf(items);
+            playerKept = ProtectedPocket.Of(items, pocketMaterials);
             for (int i = 0; i < Items.Count; i++)
                 items[(ItemId)i] -= playerKept[(ItemId)i];
             playerDrop = items;
         }
         if (!items.IsEmpty)
             Pickup.Spawn(Ground(chest), items, "рюкзак " + backpack.Owner.name, bagMaterial, 0.55f);
-    }
-
-    /// <summary>
-    /// Защищённый карман игрока: что из рюкзака не выпадает, если персонажа уничтожат. Один чертёж, а без чертежа —
-    /// до pocketMaterials штук самого дорогого материала
-    /// </summary>
-    ItemCounts PocketOf(ItemCounts items)
-    {
-        var pocket = new ItemCounts();
-        for (int i = 0; i < Items.Count; i++)
-        {
-            var id = (ItemId)i;
-            if (Items.IsBlueprint(id) && items[id] > 0)
-            {
-                pocket[id] = 1;
-                return pocket;
-            }
-        }
-        ItemId best = default;
-        int bestPrice = 0;
-        for (int i = 0; i < Items.Count; i++)
-        {
-            var id = (ItemId)i;
-            if (Items.IsMaterial(id) && items[id] > 0 && Items.SellPrice(id) > bestPrice)
-            {
-                best = id;
-                bestPrice = Items.SellPrice(id);
-            }
-        }
-        if (bestPrice > 0)
-            pocket[best] = Mathf.Min(pocketMaterials, items[best]);
-        return pocket;
     }
 
     void Player_Died(CharacterHealth character)
@@ -524,7 +388,7 @@ public class RaidDirector : MonoBehaviour
     void Noise_Made(Vector3 position, float radius, CharacterHealth source)
     {
         if (source == player)
-            noisyUntil = Time.time + 1f;
+            hud.ShowNoise();
     }
 
     // Бег игрока шумит: пока он бежит по земле, шаг слышно на Noise.SprintRadius. Шагом — тихо
@@ -554,34 +418,12 @@ public class RaidDirector : MonoBehaviour
             LoopGui.SetModal(true, player.gameObject);
             return;
         }
-        Notify($"{character.name} эвакуировался с добычей");
+        hud.Notify($"{character.name} эвакуировался с добычей");
         character.Withdraw();
         respawnTimes[character] = Time.time + raiderRespawnDelay;
     }
 
-    void PlayerBackpack_Gained(ItemId item, int count)
-    {
-        // Подряд идущие «+1 Дерево» складываются в одну строку
-        if (toasts.Count > 0 && toasts[^1].item == item && Time.time - toasts[^1].time < 1.5f)
-        {
-            var last = toasts[^1];
-            last.count += count;
-            last.time = Time.time;
-            last.text = $"+{last.count} {Items.Name(item)}";
-            toasts[^1] = last;
-            return;
-        }
-        toasts.Add(new Toast { item = item, count = count, time = Time.time, text = $"+{count} {Items.Name(item)}" });
-        if (toasts.Count > 5)
-            toasts.RemoveAt(0);
-    }
-
-    void Notify(string text)
-    {
-        notices.Add((text, Time.time));
-        if (notices.Count > 4)
-            notices.RemoveAt(0);
-    }
+    void PlayerBackpack_Gained(ItemId item, int count) => hud.AddToast(item, count);
 
     // ---------- Кадр ----------
 
@@ -595,7 +437,7 @@ public class RaidDirector : MonoBehaviour
         {
             respawnTimes.Remove(raider);
             SendRaider(raider);
-            Notify("на карту вышел новый рейдер");
+            hud.Notify("на карту вышел новый рейдер");
         }
 
         if (state == State.Playing && Keyboard.current.hKey.wasPressedThisFrame)
@@ -604,7 +446,7 @@ public class RaidDirector : MonoBehaviour
         if (Debug.isDebugBuild && state == State.Playing && Keyboard.current.pKey.wasPressedThisFrame)
         {
             playerBackpack.Add(ItemId.Ammo, DebugAmmo);
-            Notify($"отладка: +{DebugAmmo} патронов");
+            hud.Notify($"отладка: +{DebugAmmo} патронов");
         }
         if (state == State.Playing && !arena.IsGenerating && arena.Layout.seaLevel > 0)
             KeepOutOfDeepWater();
@@ -612,7 +454,7 @@ public class RaidDirector : MonoBehaviour
             MakeStepNoise();
 
         // Уничтожен: итог через пару секунд, когда тело уже упало
-        if (state == State.Lost && !LoopGui.ModalOpen && Time.time - endTime > 2.5f)
+        if (state == State.Lost && !LoopGui.ModalOpen && Time.time - endTime > LostSummaryDelay)
             LoopGui.SetModal(true, player.gameObject);
 
         if (LoopGui.ModalOpen && Keyboard.current.enterKey.wasPressedThisFrame)
@@ -647,7 +489,7 @@ public class RaidDirector : MonoBehaviour
         if (Time.time - lastDeepNotice > 3f)
         {
             lastDeepNotice = Time.time;
-            Notify("дальше глубоко: без лодки не уплыть");
+            hud.Notify("дальше глубоко: без лодки не уплыть");
         }
     }
 
@@ -659,174 +501,13 @@ public class RaidDirector : MonoBehaviour
 
     // ---------- HUD ----------
 
-    struct Toast
-    {
-        public ItemId item;
-        public int count;
-        public float time;
-        public string text;
-    }
-
-    readonly List<Toast> toasts = new();
-    readonly List<(string text, float time)> notices = new();
-    static readonly Color ExtractColor = new(0.45f, 1f, 0.55f);
-    static readonly Color PickupColor = new(1f, 0.85f, 0.4f);
-    static readonly Color PocketColor = new(0.55f, 0.85f, 1f);
-
     void OnGUI()
     {
         if (ArenaLoadingScreen.IsShown || SettingsMenu.IsOpen)
             return;
-        int font = LoopGui.FontSize;
-
-        if (state != State.Playing)
-        {
-            DrawSummary(font);
-            return;
-        }
-
-        var cam = Camera.main;
-        DrawExtractionMarks(cam, font);
-        DrawPickupLabels(cam, font);
-        DrawBackpack(font);
-        DrawNoise(font);
-        DrawToasts(font);
-        DrawNotices(font);
-    }
-
-    void DrawExtractionMarks(Camera cam, int font)
-    {
-        var style = LoopGui.Label(font, TextAnchor.LowerCenter);
-        foreach (var zone in ExtractionZone.All)
-        {
-            var position = zone.transform.position;
-            float distance = Flat(position - player.transform.position).magnitude;
-            var screen = cam.WorldToScreenPoint(position + Vector3.up * 3f);
-            if (screen.z > 0f)
-                LoopGui.Shadowed(new Rect(screen.x - 150, Screen.height - screen.y - font * 2.5f, 300, font * 2.5f),
-                    $"ЭВАКУАЦИЯ\n{Mathf.RoundToInt(distance)} м", style, ExtractColor);
-
-            float held = zone.HeldBy(player);
-            if (held >= 0f)
-            {
-                var center = LoopGui.Label(font * 2, TextAnchor.MiddleCenter);
-                int left = Mathf.CeilToInt(zone.HoldTime - held);
-                LoopGui.Shadowed(new Rect(0, Screen.height * 0.25f, Screen.width, font * 3), $"Эвакуация через {left}", center, ExtractColor);
-            }
-        }
-    }
-
-    void DrawPickupLabels(Camera cam, int font)
-    {
-        var style = LoopGui.Label(Mathf.RoundToInt(font * 0.8f), TextAnchor.LowerCenter);
-        foreach (var pickup in Pickup.All)
-        {
-            var position = pickup.transform.position;
-            if (Vector3.Distance(position, player.transform.position) > 30f)
-                continue;
-            var screen = cam.WorldToScreenPoint(position + Vector3.up * 1.4f);
-            if (screen.z <= 0f)
-                continue;
-            LoopGui.Shadowed(new Rect(screen.x - 150, Screen.height - screen.y - font * 1.5f, 300, font * 1.5f), pickup.Label, style, PickupColor);
-        }
-    }
-
-    void DrawBackpack(int font)
-    {
-        var style = LoopGui.Label(Mathf.RoundToInt(font * 0.8f), TextAnchor.LowerLeft);
-        var items = playerBackpack.Contents;
-        float line = font * 1.1f;
-        // Над строкой здоровья (её рисует SurvivorShooter внизу слева)
-        float y = Screen.height - 20 - font * 2.2f;
-        for (int i = Items.Count - 1; i >= 0; i--)
-        {
-            var id = (ItemId)i;
-            if (items[id] <= 0 || id == ItemId.Ammo)
-                continue;
-            string text = id == ItemId.Medkit ? $"{Items.Name(id)} {items[id]}  [H]" : $"{Items.Name(id)} {items[id]}";
-            LoopGui.Shadowed(new Rect(20, y - line, 400, line), text, style, Items.Tint(id));
-            y -= line;
-        }
-        var color = playerBackpack.IsFull ? new Color(1f, 0.5f, 0.4f) : Color.white;
-        string weight = playerBackpack.IsFull ? $"рюкзак полон {playerBackpack.Weight}/{playerBackpack.Capacity}" : $"рюкзак {playerBackpack.Weight}/{playerBackpack.Capacity}";
-        LoopGui.Shadowed(new Rect(20, y - line, 400, line), weight, style, color);
-        y -= line;
-        // Что останется, если уничтожат
-        var pocket = PocketOf(items);
-        if (!pocket.IsEmpty)
-            LoopGui.Shadowed(new Rect(20, y - line, 500, line), "защищённый карман: " + pocket.Describe(), style, PocketColor);
-    }
-
-    // Игрок только что шумел (выстрел, бег): рейдеры рядом могли услышать
-    void DrawNoise(int font)
-    {
-        if (Time.time >= noisyUntil)
-            return;
-        var style = LoopGui.Label(Mathf.RoundToInt(font * 0.9f), TextAnchor.MiddleCenter);
-        var color = new Color(1f, 0.8f, 0.4f, Mathf.Clamp01((noisyUntil - Time.time) / 0.5f));
-        LoopGui.Shadowed(new Rect(0, Screen.height * 0.7f, Screen.width, font * 1.5f), "шум", style, color);
-    }
-
-    void DrawToasts(int font)
-    {
-        var style = LoopGui.Label(Mathf.RoundToInt(font * 0.9f), TextAnchor.LowerRight);
-        float line = font * 1.2f;
-        float y = Screen.height - 20 - font * 2.2f;
-        for (int i = toasts.Count - 1; i >= 0; i--)
-        {
-            float age = Time.time - toasts[i].time;
-            if (age > 2.5f)
-            {
-                toasts.RemoveAt(i);
-                continue;
-            }
-            var color = Items.Tint(toasts[i].item);
-            color.a = Mathf.Clamp01((2.5f - age) / 0.5f);
-            LoopGui.Shadowed(new Rect(0, y - line, Screen.width - 20, line), toasts[i].text, style, color);
-            y -= line;
-        }
-    }
-
-    void DrawNotices(int font)
-    {
-        var style = LoopGui.Label(Mathf.RoundToInt(font * 0.8f), TextAnchor.UpperCenter);
-        float y = font * 1.5f;
-        for (int i = notices.Count - 1; i >= 0; i--)
-        {
-            if (Time.time - notices[i].time > 5f)
-            {
-                notices.RemoveAt(i);
-                continue;
-            }
-            LoopGui.Shadowed(new Rect(0, y, Screen.width, font * 1.3f), notices[i].text, style, new Color(1f, 0.75f, 0.6f));
-            y += font * 1.2f;
-        }
-    }
-
-    void DrawSummary(int font)
-    {
-        if (state == State.Lost && Time.time - endTime <= 2.5f)
-            return;
-        var result = Profile.LastRaid;
-        float w = Mathf.Min(Screen.width - 40, font * 26), h = font * 13;
-        var rect = new Rect((Screen.width - w) * 0.5f, (Screen.height - h) * 0.5f, w, h);
-        LoopGui.Panel(rect, 0.85f);
-
-        var title = LoopGui.Label(font * 2, TextAnchor.UpperCenter);
-        LoopGui.Shadowed(new Rect(rect.x, rect.y + font, w, font * 3), result.extracted ? "Эвакуация удалась" : "Вы уничтожены",
-            title, result.extracted ? ExtractColor : new Color(1f, 0.45f, 0.4f));
-
-        var body = LoopGui.Label(font, TextAnchor.UpperCenter);
-        body.wordWrap = true;
-        string text = (result.extracted ? "Вынесено: " : "Потеряно: ") + result.items.Describe();
-        if (!result.kept.IsEmpty)
-            text += "\nЗащищённый карман сохранил: " + result.kept.Describe();
-        if (result.unlocked.Length > 0)
-            text += "\n\nОткрыты рецепты: " + string.Join(", ", result.unlocked);
-        LoopGui.Shadowed(new Rect(rect.x + font, rect.y + font * 4, w - font * 2, h - font * 7), text, body, Color.white);
-        body.wordWrap = false;
-
-        if (GUI.Button(new Rect(rect.x + (w - font * 10) * 0.5f, rect.yMax - font * 2.8f, font * 10, font * 2), "На базу  [Enter]"))
+        if (state == State.Playing)
+            hud.Draw();
+        else if (!(state == State.Lost && Time.time - endTime <= LostSummaryDelay) && hud.DrawSummary())
             ReturnToBase();
     }
 }

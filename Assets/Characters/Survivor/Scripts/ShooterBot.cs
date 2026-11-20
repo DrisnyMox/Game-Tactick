@@ -356,9 +356,9 @@ public class ShooterBot : MonoBehaviour
             {
                 // Добыл всё в этом месте — к другому
                 nextGatherCheck = Time.time + 0.5f;
-                if (!director.GatherTarget(gatherSpot, out gatherPoint))
+                if (!director.GatherSpots.Target(gatherSpot, out gatherPoint))
                 {
-                    director.RemoveGatherSpot(gatherSpot);
+                    director.GatherSpots.Remove(gatherSpot);
                     gatherSpot = -1;
                 }
             }
@@ -396,7 +396,7 @@ public class ShooterBot : MonoBehaviour
     // Место добычи: случайное из нескольких ближайших
     void ChooseGatherSpot(RaidDirector director)
     {
-        gatherSpot = director.RandomNearGatherSpot(transform.position);
+        gatherSpot = director.GatherSpots.RandomNear(transform.position);
         gatherSpotUntil = Time.time + gatherSpotTime;
         nextGatherCheck = 0f;
     }
