@@ -3,6 +3,7 @@ using UnityEditor;
 
 namespace VoxelCharacterSystem.Editor
 {
+    /// <summary>Инспектор VoxelCharacterMultipart: кнопки генерации HD-персонажа по частям и сохранения мешей и префаба</summary>
     [CustomEditor(typeof(VoxelCharacterMultipart))]
     public class VoxelCharacterHDEditor : UnityEditor.Editor
     {

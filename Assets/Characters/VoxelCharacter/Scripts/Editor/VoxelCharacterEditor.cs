@@ -3,6 +3,7 @@ using UnityEditor;
 
 namespace VoxelCharacterSystem.Editor
 {
+    /// <summary>Инспектор VoxelCharacter: кнопки генерации воксельного меша и сохранения его ассетом</summary>
     [CustomEditor(typeof(VoxelCharacter))]
     public class VoxelCharacterEditor : UnityEditor.Editor
     {
