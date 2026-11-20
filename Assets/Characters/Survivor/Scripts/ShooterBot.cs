@@ -16,7 +16,8 @@ using UnityEngine.AI;
 ///  * видит и цель ближе - стоит и шагает вбок, меняя сторону; совсем близко - отходит;
 ///  * стреляет очередями после задержки реакции, прицел плавно гуляет вокруг груди цели на spreadDegrees;
 ///  * упёрся в уступ (хочет идти, а стоит на месте) - прыгает;
-///  * расходится с союзниками ближе separation, чтобы команда не бежала одной толпой.
+///  * расходится с союзниками ближе separation, чтобы команда не бежала одной толпой;
+///  * рейдер слышит шум врага (Noise: выстрел, бег) и идёт проверить место, осматриваясь investigateTime.
 /// Компонент и ссылки ставит Tools/Unity/SetupArenaBot.cs.
 /// </summary>
 // Раньше ThirdPersonController: ввод этого кадра должен быть готов к его Update
@@ -67,6 +68,8 @@ public class ShooterBot : MonoBehaviour
     [SerializeField] float pickupNoticeDistance = 30f;
     [Tooltip("Сколько секунд рейдер отвечает огнём тому, кто в него попал, даже не видя его")]
     [SerializeField] float grudgeTime = 8f;
+    [Tooltip("Сколько секунд рейдер проверяет место, где услышал врага (Noise): идёт туда и осматривается")]
+    [SerializeField] float investigateTime = 12f;
 
     SurvivorShooter shooter;
     StarterAssetsInputs input;
@@ -103,6 +106,9 @@ public class ShooterBot : MonoBehaviour
     Vector3 gatherPoint;
     float nextGatherCheck;
     float gatherBurstEnd, gatherPause;
+    // Где рейдер последний раз услышал врага и до какого времени проверяет это место
+    Vector3 heardPosition;
+    float heardUntil = float.NegativeInfinity;
 
     public bool Raider => raider;
 
@@ -115,6 +121,26 @@ public class ShooterBot : MonoBehaviour
     {
         raidStart = Time.time;
         gatherSpot = -1;
+        heardUntil = float.NegativeInfinity;
+    }
+
+    /// <summary>Рейдер проверяет место, где слышал врага</summary>
+    public bool Investigating => raider && Time.time < heardUntil;
+
+    void OnEnable()
+    {
+        Noise.Made += Noise_Made;
+    }
+
+    // Шум врага в пределах слышимости: рейдер запоминает место и идёт проверить. Своих не слушает
+    void Noise_Made(Vector3 position, float radius, CharacterHealth source)
+    {
+        if (!raider || source == self || source.Team == self.Team || source.IsDead)
+            return;
+        if (Vector3.Distance(transform.position, position) > radius)
+            return;
+        heardPosition = position;
+        heardUntil = Time.time + investigateTime;
     }
 
     void Awake()
@@ -136,6 +162,8 @@ public class ShooterBot : MonoBehaviour
 
     void OnDisable()
     {
+        Noise.Made -= Noise_Made;
+        heardUntil = float.NegativeInfinity;
         // Мёртвый или выключенный бот не должен продолжать бежать и стрелять
         input.move = Vector2.zero;
         input.sprint = false;
@@ -291,8 +319,9 @@ public class ShooterBot : MonoBehaviour
         return attacker;
     }
 
-    // Рейдер без цели: набрал добычи — идёт на ближайшую эвакуацию, видит мешок или ящик — идёт к нему,
-    // иначе добывает: подходит к дереву, камню или руде на gatherDistance и стреляет в них
+    // Рейдер без цели: набрал добычи — идёт на ближайшую эвакуацию, услышал врага — идёт проверить и осматривается,
+    // видит мешок или ящик — идёт к нему, иначе добывает: подходит к дереву, камню или руде на gatherDistance
+    // и стреляет в них
     void Roam()
     {
         shooter.FireInput = false;
@@ -302,6 +331,21 @@ public class ShooterBot : MonoBehaviour
 
         if (WantsExtract)
             goal = director.NearestExtraction(transform.position);
+        else if (Investigating)
+        {
+            // Дошёл — стоит с поднятой винтовкой и смотрит в сторону шума, пока не выйдет время
+            if (Flat(heardPosition - transform.position).magnitude <= 4f)
+            {
+                input.move = Vector2.zero;
+                input.sprint = false;
+                hasPath = false;
+                float t = Time.time * 0.6f + noiseSeed;
+                shooter.AimTarget = heardPosition + Vector3.up * 1.3f + Quaternion.Euler(0f, Mathf.Sin(t) * 120f, 0f) * Vector3.forward * 6f;
+                shooter.AimInput = true;
+                return;
+            }
+            goal = heardPosition;
+        }
         else if (NearestPickup(out var pickup))
             goal = pickup;
         else

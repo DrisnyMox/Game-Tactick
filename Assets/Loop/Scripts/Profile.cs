@@ -30,6 +30,8 @@ public static class Profile
     {
         public bool extracted;
         public ItemCounts items = new();
+        // Уничтожен: что сохранил защищённый карман
+        public ItemCounts kept = new();
         public string[] unlocked = Array.Empty<string>();
     }
 
@@ -83,6 +85,29 @@ public static class Profile
         Save();
     }
 
+    /// <summary>Бесплатный набор: патроны на два магазина и аптечка</summary>
+    public static ItemCounts FreeKit
+    {
+        get
+        {
+            var kit = new ItemCounts();
+            kit[ItemId.Ammo] = 60;
+            kit[ItemId.Medkit] = 1;
+            return kit;
+        }
+    }
+
+    /// <summary>Бесплатный набор даётся, только когда патронов нет ни в рюкзаке, ни на складе: иначе его копили бы</summary>
+    public static bool CanTakeFreeKit => Current.carried[ItemId.Ammo] == 0 && Current.stash[ItemId.Ammo] == 0;
+
+    public static void TakeFreeKit()
+    {
+        var kit = FreeKit;
+        for (int i = 0; i < Items.Count; i++)
+            Current.carried[(ItemId)i] += kit[(ItemId)i];
+        Save();
+    }
+
     public static bool HasBlueprint(ItemId blueprint) => Current.blueprints[(int)blueprint];
 
     public static bool IsUnlocked(Recipe recipe) => recipe.blueprint == null || HasBlueprint(recipe.blueprint.Value);
@@ -129,11 +154,30 @@ public static class Profile
         LastRaid.items.CopyFrom(brought);
     }
 
-    /// <summary>Персонаж уничтожен: всё, что было в рюкзаке, потеряно</summary>
-    public static void Lose(ItemCounts lost)
+    /// <summary>
+    /// Персонаж уничтожен: рюкзак потерян, кроме защищённого кармана kept — чертёж из него открывает рецепт,
+    /// материалы ложатся на склад
+    /// </summary>
+    public static void Lose(ItemCounts lost, ItemCounts kept)
     {
+        var unlocked = new System.Collections.Generic.List<string>();
+        for (int i = 0; i < Items.Count; i++)
+        {
+            var id = (ItemId)i;
+            if (kept[id] <= 0)
+                continue;
+            if (Items.IsBlueprint(id))
+            {
+                if (!Current.blueprints[i])
+                    unlocked.Add(Items.Name(id));
+                Current.blueprints[i] = true;
+            }
+            else
+                Current.stash[id] += kept[id];
+        }
         Save();
-        LastRaid = new RaidResult { extracted = false };
+        LastRaid = new RaidResult { extracted = false, unlocked = unlocked.ToArray() };
         LastRaid.items.CopyFrom(lost);
+        LastRaid.kept.CopyFrom(kept);
     }
 }

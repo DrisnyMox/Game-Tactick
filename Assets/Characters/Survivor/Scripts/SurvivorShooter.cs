@@ -401,6 +401,7 @@ public class SurvivorShooter : MonoBehaviour
     void Shoot()
     {
         ammo--;
+        Noise.Make(transform.position, Noise.ShotRadius, health);
         animator.SetTrigger(ShootId);
         weapon.PlayShot();
         kick += kickAngle;

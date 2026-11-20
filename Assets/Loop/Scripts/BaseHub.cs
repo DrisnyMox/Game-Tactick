@@ -169,6 +169,8 @@ public class BaseHub : MonoBehaviour
         string body = result.extracted
             ? $"Вынесено: {result.items.Describe()}.\nМатериалы — на складе, снаряжение — в рюкзаке."
             : $"Персонаж уничтожен. Потеряно: {result.items.Describe()}.";
+        if (!result.extracted && !result.kept.IsEmpty)
+            body += $"\nЗащищённый карман сохранил: {result.kept.Describe()}.";
         if (result.unlocked.Length > 0)
             body += $"\n\n<color=#66b3ff>Открыты рецепты: {string.Join(", ", result.unlocked)}</color>";
         GUILayout.Label(body, text);
@@ -324,11 +326,22 @@ public class BaseHub : MonoBehaviour
 
     void DrawExit()
     {
-        var carried = Profile.Current.carried;
+        var profile = Profile.Current;
+        var carried = profile.carried;
         GUILayout.Label($"В рюкзаке: {carried.Describe()}.", text);
         if (carried[ItemId.Ammo] == 0)
             GUILayout.Label("<color=#ff8a7a>Патронов нет: возьми их на складе или купи у торговца.</color>", text);
-        GUILayout.Label("Всё, что в рюкзаке, можно потерять. Эвакуация — 10 секунд в зелёном луче.", text);
+        // Бесплатный набор: патронов нет ни в рюкзаке, ни на складе — без него из вылазок не выбраться
+        if (Profile.CanTakeFreeKit)
+        {
+            GUILayout.Space(6);
+            GUILayout.Label($"Можно взять бесплатный набор: {Profile.FreeKit.Describe()}. Он даётся, когда патронов нет совсем.", text);
+            if (GUILayout.Button("Взять бесплатный набор", small))
+                Profile.TakeFreeKit();
+            GUILayout.Space(6);
+        }
+        GUILayout.Label("Всё, что в рюкзаке, можно потерять, кроме защищённого кармана: в нём остаётся один чертёж, " +
+                        "а без чертежа — несколько штук самого дорогого материала. Эвакуация — 10 секунд в зелёном луче.", text);
         GUILayout.Space(10);
         if (GUILayout.Button("В вылазку", button, GUILayout.Height(text.fontSize * 2.4f)))
         {

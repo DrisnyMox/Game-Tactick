@@ -19,7 +19,7 @@ public class CharacterHealth : MonoBehaviour, IShootable
     /// <summary>Все персонажи в сцене, живые и мёртвые: среди них бот ищет врагов</summary>
     public static IReadOnlyList<CharacterHealth> All => all;
 
-    [Tooltip("Команда: 0 - игрок и союзники, 1 - противник. Своя пуля своему урона не наносит")]
+    [Tooltip("Команда: 0 - игрок и союзники, 1 - противник. Своя пуля своему урона не наносит. На вылазке RaidDirector даёт каждому рейдеру свою")]
     [SerializeField] int team;
     [SerializeField] float maxHealth = 100f;
     [Tooltip("Во сколько раз больше урон от попадания в голову")]
@@ -36,6 +36,9 @@ public class CharacterHealth : MonoBehaviour, IShootable
     Behaviour[] aliveOnly;
 
     public int Team => team;
+
+    /// <summary>Сменить команду: на вылазке каждый рейдер сам за себя (RaidDirector)</summary>
+    public void SetTeam(int value) => team = value;
     /// <summary>Кость груди: в неё целятся боты</summary>
     public Transform Chest { get; private set; }
     public float Health { get; private set; }

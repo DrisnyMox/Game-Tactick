@@ -15,8 +15,9 @@ using UnityEngine.SceneManagement;
 /// дальние точки захвата, ящики — у остальных точек. В двух ящиках чертежи.
 ///
 /// Во время вылазки: выпавший рюкзак становится мешком (Pickup) на месте; уничтоженный или эвакуированный
-/// рейдер через raiderRespawnDelay выходит на карту новым, с пустым рюкзаком. H — аптечка.
-/// Игрок эвакуировался — рюкзак уходит на склад (Profile.Extract), уничтожен — рюкзак потерян (Profile.Lose).
+/// рейдер через raiderRespawnDelay выходит на карту новым, с пустым рюкзаком. H — аптечка. Бег игрока шумит (Noise).
+/// Игрок эвакуировался — рюкзак уходит на склад (Profile.Extract), уничтожен — рюкзак потерян, кроме защищённого
+/// кармана (PocketOf, Profile.Lose).
 /// Итог на экране, затем сцена Base.
 ///
 /// HUD: метки эвакуации с расстоянием, отсчёт в круге, рюкзак, подписи добычи, всплывающие «+1 Дерево».
@@ -50,6 +51,8 @@ public class RaidDirector : MonoBehaviour
     [SerializeField] int sandCrates = 6;
     [Tooltip("Ящики на песке не ближе этого друг к другу, к другим ящикам и к высадке, м")]
     [SerializeField] float sandCrateSpacing = 25f;
+    [Tooltip("Защищённый карман: сколько штук самого дорогого материала остаётся, если игрока уничтожат (чертёж — всегда один)")]
+    [SerializeField] int pocketMaterials = 5;
     [Tooltip("Насколько выше поверхности ставить персонажа, м")]
     [SerializeField] float lift = 0.1f;
 
@@ -63,6 +66,11 @@ public class RaidDirector : MonoBehaviour
     VoxelArena arena;
     Backpack playerBackpack;
     SurvivorShooter playerShooter;
+    StarterAssets.StarterAssetsInputs playerInput;
+    CharacterController playerController;
+    float nextStepNoise;
+    // Игрок шумел (выстрел или бег): HUD показывает «шум» до этого времени
+    float noisyUntil;
     readonly List<CharacterHealth> raiders = new();
     readonly Dictionary<CharacterHealth, float> respawnTimes = new();
     readonly List<CharacterHealth> due = new();
@@ -73,6 +81,7 @@ public class RaidDirector : MonoBehaviour
     // Клетки раскладки, где можно выйти на карту: суша без воды, деревьев и камней, вне баз
     readonly List<int2> spawnCells = new();
     ItemCounts playerDrop;
+    ItemCounts playerKept;
     State state;
     float endTime;
     Vector3 lastDry;
@@ -99,7 +108,10 @@ public class RaidDirector : MonoBehaviour
     {
         playerBackpack = player.GetComponent<Backpack>();
         playerShooter = player.GetComponent<SurvivorShooter>();
+        playerInput = player.GetComponent<StarterAssets.StarterAssetsInputs>();
+        playerController = player.GetComponent<CharacterController>();
         playerBackpack.Gained += PlayerBackpack_Gained;
+        Noise.Made += Noise_Made;
         player.Died += Player_Died;
 
         var carried = Profile.TakeCarriedForRaid();
@@ -116,6 +128,8 @@ public class RaidDirector : MonoBehaviour
                 continue;
             if (!character.GetComponent<ShooterBot>().Raider)
                 Debug.LogError($"[Raid] {character.name}: ShooterBot не в режиме рейдера. Запусти Tools/Unity/SetupRaid.cs.", character);
+            // Каждый рейдер сам за себя: своя команда, стреляет и в игрока, и в других рейдеров, слышит их шум
+            character.SetTeam(player.Team + 1 + raiders.Count);
             raiders.Add(character);
             character.Died += Raider_Died;
         }
@@ -127,6 +141,7 @@ public class RaidDirector : MonoBehaviour
             Current = null;
         arena.Generated -= Arena_Generated;
         Backpack.Dropped -= Backpack_Dropped;
+        Noise.Made -= Noise_Made;
         ExtractionZone.Extracted -= Zone_Extracted;
     }
 
@@ -339,7 +354,12 @@ public class RaidDirector : MonoBehaviour
         for (int attempt = 0; attempt < 50; attempt++)
         {
             var candidate = arena.CellTop(spawnCells[UnityEngine.Random.Range(0, spawnCells.Count)]);
-            if (Flat(candidate - player.transform.position).magnitude >= minRaiderDistance)
+            bool apart = Flat(candidate - player.transform.position).magnitude >= minRaiderDistance;
+            // Рейдеры воюют друг с другом: новый не выходит на карту в упор к другому
+            foreach (var other in raiders)
+                apart &= other == raider || other.IsDead || !other.gameObject.activeInHierarchy
+                         || Flat(candidate - other.transform.position).magnitude >= minRaiderDistance * 0.6f;
+            if (apart)
             {
                 position = candidate;
                 break;
@@ -447,9 +467,48 @@ public class RaidDirector : MonoBehaviour
 
     void Backpack_Dropped(Backpack backpack, Vector3 chest, ItemCounts items)
     {
+        // Защищённый карман игрока остаётся с ним, на землю падает остальное
         if (backpack.Owner == player)
+        {
+            playerKept = PocketOf(items);
+            for (int i = 0; i < Items.Count; i++)
+                items[(ItemId)i] -= playerKept[(ItemId)i];
             playerDrop = items;
-        Pickup.Spawn(Ground(chest), items, "рюкзак " + backpack.Owner.name, bagMaterial, 0.55f);
+        }
+        if (!items.IsEmpty)
+            Pickup.Spawn(Ground(chest), items, "рюкзак " + backpack.Owner.name, bagMaterial, 0.55f);
+    }
+
+    /// <summary>
+    /// Защищённый карман игрока: что из рюкзака не выпадает, если персонажа уничтожат. Один чертёж, а без чертежа —
+    /// до pocketMaterials штук самого дорогого материала
+    /// </summary>
+    ItemCounts PocketOf(ItemCounts items)
+    {
+        var pocket = new ItemCounts();
+        for (int i = 0; i < Items.Count; i++)
+        {
+            var id = (ItemId)i;
+            if (Items.IsBlueprint(id) && items[id] > 0)
+            {
+                pocket[id] = 1;
+                return pocket;
+            }
+        }
+        ItemId best = default;
+        int bestPrice = 0;
+        for (int i = 0; i < Items.Count; i++)
+        {
+            var id = (ItemId)i;
+            if (Items.IsMaterial(id) && items[id] > 0 && Items.SellPrice(id) > bestPrice)
+            {
+                best = id;
+                bestPrice = Items.SellPrice(id);
+            }
+        }
+        if (bestPrice > 0)
+            pocket[best] = Mathf.Min(pocketMaterials, items[best]);
+        return pocket;
     }
 
     void Player_Died(CharacterHealth character)
@@ -458,11 +517,28 @@ public class RaidDirector : MonoBehaviour
             return;
         state = State.Lost;
         endTime = Time.time;
-        // Обработчик рюкзака подписан раньше (Awake) и уже выложил его содержимое в playerDrop
-        Profile.Lose(playerDrop ?? new ItemCounts());
+        // Обработчик рюкзака подписан раньше (Awake) и уже выложил его содержимое в playerDrop и карман в playerKept
+        Profile.Lose(playerDrop ?? new ItemCounts(), playerKept ?? new ItemCounts());
     }
 
     void Raider_Died(CharacterHealth raider) => respawnTimes[raider] = Time.time + raiderRespawnDelay;
+
+    void Noise_Made(Vector3 position, float radius, CharacterHealth source)
+    {
+        if (source == player)
+            noisyUntil = Time.time + 1f;
+    }
+
+    // Бег игрока шумит: пока он бежит по земле, шаг слышно на Noise.SprintRadius. Шагом — тихо
+    void MakeStepNoise()
+    {
+        var velocity = playerController.velocity;
+        velocity.y = 0f;
+        if (!playerInput.sprint || !playerController.isGrounded || velocity.magnitude < 3f || Time.time < nextStepNoise)
+            return;
+        nextStepNoise = Time.time + 0.4f;
+        Noise.Make(player.transform.position, Noise.SprintRadius, player);
+    }
 
     void Zone_Extracted(ExtractionZone zone, CharacterHealth character)
     {
@@ -534,6 +610,8 @@ public class RaidDirector : MonoBehaviour
         }
         if (state == State.Playing && !arena.IsGenerating && arena.Layout.seaLevel > 0)
             KeepOutOfDeepWater();
+        if (state == State.Playing && !arena.IsGenerating)
+            MakeStepNoise();
 
         // Уничтожен: итог через пару секунд, когда тело уже упало
         if (state == State.Lost && !LoopGui.ModalOpen && Time.time - endTime > 2.5f)
@@ -595,6 +673,7 @@ public class RaidDirector : MonoBehaviour
     readonly List<(string text, float time)> notices = new();
     static readonly Color ExtractColor = new(0.45f, 1f, 0.55f);
     static readonly Color PickupColor = new(1f, 0.85f, 0.4f);
+    static readonly Color PocketColor = new(0.55f, 0.85f, 1f);
 
     void OnGUI()
     {
@@ -612,6 +691,7 @@ public class RaidDirector : MonoBehaviour
         DrawExtractionMarks(cam, font);
         DrawPickupLabels(cam, font);
         DrawBackpack(font);
+        DrawNoise(font);
         DrawToasts(font);
         DrawNotices(font);
     }
@@ -672,6 +752,21 @@ public class RaidDirector : MonoBehaviour
         var color = playerBackpack.IsFull ? new Color(1f, 0.5f, 0.4f) : Color.white;
         string weight = playerBackpack.IsFull ? $"рюкзак полон {playerBackpack.Weight}/{playerBackpack.Capacity}" : $"рюкзак {playerBackpack.Weight}/{playerBackpack.Capacity}";
         LoopGui.Shadowed(new Rect(20, y - line, 400, line), weight, style, color);
+        y -= line;
+        // Что останется, если уничтожат
+        var pocket = PocketOf(items);
+        if (!pocket.IsEmpty)
+            LoopGui.Shadowed(new Rect(20, y - line, 500, line), "защищённый карман: " + pocket.Describe(), style, PocketColor);
+    }
+
+    // Игрок только что шумел (выстрел, бег): рейдеры рядом могли услышать
+    void DrawNoise(int font)
+    {
+        if (Time.time >= noisyUntil)
+            return;
+        var style = LoopGui.Label(Mathf.RoundToInt(font * 0.9f), TextAnchor.MiddleCenter);
+        var color = new Color(1f, 0.8f, 0.4f, Mathf.Clamp01((noisyUntil - Time.time) / 0.5f));
+        LoopGui.Shadowed(new Rect(0, Screen.height * 0.7f, Screen.width, font * 1.5f), "шум", style, color);
     }
 
     void DrawToasts(int font)
@@ -726,6 +821,8 @@ public class RaidDirector : MonoBehaviour
         var body = LoopGui.Label(font, TextAnchor.UpperCenter);
         body.wordWrap = true;
         string text = (result.extracted ? "Вынесено: " : "Потеряно: ") + result.items.Describe();
+        if (!result.kept.IsEmpty)
+            text += "\nЗащищённый карман сохранил: " + result.kept.Describe();
         if (result.unlocked.Length > 0)
             text += "\n\nОткрыты рецепты: " + string.Join(", ", result.unlocked);
         LoopGui.Shadowed(new Rect(rect.x + font, rect.y + font * 4, w - font * 2, h - font * 7), text, body, Color.white);
