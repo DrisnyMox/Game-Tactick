@@ -12,9 +12,9 @@ public static class ProbeLoopStep
         Application.runInBackground = true;
         EditorApplication.QueuePlayerLoopUpdate();
         var scene = SceneManager.GetActiveScene().name;
-        if (scene == BaseHub.SceneName)
+        if (scene == SceneNames.Base)
         {
-            SceneManager.LoadScene(RaidDirector.SceneName);
+            SceneManager.LoadScene(SceneNames.Raid);
             return "loading Raid";
         }
         if (RaidDirector.Current == null || ExtractionZone.All.Count == 0)

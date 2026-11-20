@@ -26,8 +26,6 @@ using UnityEngine.SceneManagement;
 [RequireComponent(typeof(VoxelArena))]
 public class RaidDirector : MonoBehaviour
 {
-    public const string SceneName = "Raid";
-
     /// <summary>Вылазка в этой сцене; null — сцена без вылазки (бой на арене)</summary>
     public static RaidDirector Current { get; private set; }
 
@@ -656,7 +654,7 @@ public class RaidDirector : MonoBehaviour
     void ReturnToBase()
     {
         LoopGui.SetModal(false, player.gameObject);
-        SceneManager.LoadScene(BaseHub.SceneName);
+        SceneManager.LoadScene(SceneNames.Base);
     }
 
     // ---------- HUD ----------

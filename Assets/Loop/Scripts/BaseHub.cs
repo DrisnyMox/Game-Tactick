@@ -15,8 +15,6 @@ using UnityEngine.SceneManagement;
 /// </summary>
 public class BaseHub : MonoBehaviour
 {
-    public const string SceneName = "Base";
-
     [SerializeField] GameObject player;
     [SerializeField] BaseStation[] stations;
 
@@ -347,7 +345,7 @@ public class BaseHub : MonoBehaviour
         {
             open = null;
             LoopGui.SetModal(false, player);
-            SceneManager.LoadScene(RaidDirector.SceneName);
+            SceneManager.LoadScene(SceneNames.Raid);
         }
     }
 }
