@@ -22,6 +22,7 @@
 
 ## Связи из инспектора и настроек
 
+- Игрок в сценах — вариант `PlayerSurvivor8b8745d5` (другая модель), боты и рейдеры — `PlayerSurvivor`. Компоненты правятся в `PlayerSurvivor`, вариант их наследует; кости, меш, аватар, рэгдолл и `weaponLocalPosition`/`weaponLocalEuler` у варианта свои (`SetupPlayerModel.cs`). Пробы ищут игрока по имени `PlayerSurvivor`, это имя объекта в сцене.
 - `PlayerInput` на `PlayerSurvivor` работает в режиме Send Messages. Он вызывает по имени `OnAim`, `OnFire`, `OnReload` у `SurvivorShooter` и `OnMove`, `OnLook` и другие у `StarterAssetsInputs`. Эти методы не переименовывать. Записи `InputMove`/`InputLook` в Action Events префаба — старые, в режиме Send Messages не работают.
 - Animation Event нет.
 - `followCamera` у `SurvivorShooter` игрока обязателен и задаётся в каждой сцене (в префабе пусто), иначе `NullReferenceException` в `Awake`.

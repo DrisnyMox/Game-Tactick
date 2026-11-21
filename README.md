@@ -46,8 +46,16 @@ Unity **6000.6.8f1**, URP 17, Cinemachine 3, Input System (старый `Input` 
 ### Персонаж
 - Модель `Assets/Characters/Survivor/SurvivorRigged.fbx`: риг сделан в Blender скриптом
   `Tools/Blender/rig_survivor_fbx.py` (Humanoid, 51 кость с пальцами).
+- Модель `Assets/Models/20261121003938_8b8745d5.fbx` (девушка в купальнике, рост 1,09 м при импорте 1:1):
+  риг — `Tools/Blender/rig_model_8b8745d5.py` (Humanoid, тот же скелет из 51 кости). Скрипту на вход нужен
+  FBX без костей: глаза, зубы, язык и нижние ресницы он вешает на `Head` и сводит всё в один меш `Body`.
+  После переимпорта — пункт меню **Модель 20261121003938_8b8745d5: настроить Humanoid**. Это модель игрока:
+  масштаб импорта 1,662 даёт рост выжившего, 1,81 м.
 - Префаб `Assets/Characters/Survivor/PlayerSurvivor.prefab` — копия PlayerArmature из Starter Assets
-  с моделью выжившего: `ThirdPersonController`, `StarterAssetsInputs`, `PlayerInput`.
+  с моделью выжившего: `ThirdPersonController`, `StarterAssetsInputs`, `PlayerInput`. На нём боты и рейдеры.
+- Игрок во всех сценах — вариант `PlayerSurvivor8b8745d5.prefab`: кости, меш, аватар и рэгдолл новой модели,
+  смещение винтовки в кисти пересчитано под её кисть. Всё остальное (стрельба, граната, рюкзак, здоровье)
+  берётся из `PlayerSurvivor`. Собирает `Tools/Unity/SetupPlayerModel.cs`.
 - На костях рэгдолл из 11 тел (слой `Hitbox`): пока персонаж жив, кости ходят за анимацией и принимают пули,
   после смерти падают.
 
@@ -97,11 +105,15 @@ unity command run_script --file Tools/Unity/<Скрипт>.cs --project-path "D:
 6. `SetupFpsCounter.cs` — Canvas со счётчиком FPS.
 . `SetupLoop.cs` — срез: `Backpack` на префабе, материалы `Assets/Loop/Materials`, сцены `Raid` и `Base`
    (копии `SampleScene`), порядок сцен в Build Settings.
+8. `SetupPlayerModel.cs` — вариант `PlayerSurvivor8b8745d5` с моделью `20261121003938_8b8745d5` и он же
+   вместо `PlayerSurvivor` у игрока в `Base`, `Raid`, `SampleScene`, `SurvivorPlayground`. Запускать после
+   остальных: они правят `PlayerSurvivor` и ставят его в сцены.
 
 Скрипты можно запускать повторно: готовое они не дублируют.
 
 Пункты меню **Tools → Voxel Arena**:
 - **Survivor Rigged: настроить Humanoid** (`SurvivorRiggedAvatarSetup.cs`) — нужен после переимпорта модели;
+- **Модель 20261121003938_8b8745d5: настроить Humanoid** (там же) — то же для модели из `Assets/Models`;
 - **Create Test Setup** — пустая сцена с ареной в старом виде RTS;
 - **Generate Voxel Character (Survivor)** и **Generate Voxel Character HD (Multipart)** — воксельный персонаж
   из более ранних опытов, в шутере не используется.
