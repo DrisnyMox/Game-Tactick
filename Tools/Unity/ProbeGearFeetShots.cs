@@ -6,10 +6,10 @@ using StarterAssets;
 using UnityEditor;
 using UnityEngine;
 
-// Снимки обуви вблизи в Play (сцена SurvivorPlayground): стоя, при ходьбе, беге и в прыжке. Числам замера
+// Снимки обуви и штанов вблизи в Play (сцена SurvivorPlayground): стоя, при ходьбе, беге, в прыжке и в прицеле. Числам замера
 // place_gear.py одним верить нельзя, вид проверяется глазами. Первый запуск ставит ввод игрока по сценарию States
 // (как ProbeGear.cs: каждое состояние - с точки старта, в сторону, где простор) и в заданные моменты ставит
-// временные камеры у каждой ступни: снаружи, изнутри, спереди, сзади, и две камеры на обе ноги. Снимки -
+// временные камеры у каждой ступни: снаружи, изнутри, спереди, сзади, две камеры на обе ноги и четыре на пояс. Снимки -
 // Temp/GearShots/feet_<состояние>_<время>_*.png. В тот же момент пишет, насколько подошва каждого ботинка
 // ниже земли под ним (луч вниз по слою Default). Повторные запуски печатают ход, в конце - итог.
 // Перед запуском: editor_play, editor_focus, set_autotick --enable true (CLAUDE.md, «Проверка после правки кода»).
@@ -25,13 +25,15 @@ public static class ProbeGearFeetShots
     // run_script каждый раз собирает новую сборку и её статика начинается заново, поэтому ход - в SessionState
     const string Running = "ProbeGearFeetShots.running", ProgressKey = "ProbeGearFeetShots.progress";
 
-    // Сценарий: имя, длительность, ввод, моменты снимков от начала состояния
-    static readonly (string name, float time, Vector2 move, bool sprint, bool jump, float[] shots)[] States =
+    // Сценарий: имя, длительность, ввод, прицел, моменты снимков от начала состояния
+    static readonly (string name, float time, Vector2 move, bool sprint, bool jump, bool aim, float[] shots)[] States =
     {
-        ("idle", 1.6f, Vector2.zero, false, false, new[] { 1.2f }),
-        ("walk", 2.0f, Vector2.up, false, false, new[] { 1.2f, 1.5f }),
-        ("run", 2.0f, Vector2.up, true, false, new[] { 1.2f, 1.35f }),
-        ("jump", 2.0f, Vector2.zero, false, true, new[] { 0.35f, 0.7f, 1.6f }),
+        ("idle", 1.6f, Vector2.zero, false, false, false, new[] { 1.2f }),
+        ("walk", 2.0f, Vector2.up, false, false, false, new[] { 1.2f, 1.5f }),
+        ("run", 2.0f, Vector2.up, true, false, false, new[] { 1.2f, 1.35f }),
+        ("jump", 2.0f, Vector2.zero, false, true, false, new[] { 0.35f, 0.7f, 1.6f }),
+        ("aim", 2.0f, Vector2.zero, false, false, true, new[] { 1.4f }),
+        ("aim_walk", 2.0f, Vector2.right, false, false, true, new[] { 1.2f, 1.5f }),
     };
 
     public static string Main()
@@ -113,6 +115,7 @@ public static class ProbeGearFeetShots
                 input.move = States[state].move;
                 input.sprint = States[state].sprint;
                 input.look = Vector2.zero;
+                shooter.AimInput = States[state].aim;
             }
             var s = States[state];
             input.jump = s.jump && now - stateStart < 0.1f;
@@ -155,6 +158,12 @@ public static class ProbeGearFeetShots
             legs.y = root.position.y + 0.3f;
             ShootAt($"{prefix}_legs_side", legs, root.right + root.forward * 0.3f, 1.8f);
             ShootAt($"{prefix}_legs_back_top", legs, -root.forward + Vector3.up * 0.8f, 1.8f);
+            // Пояс: нет ли голой кожи между штанами и нагрудником, в том числе снизу
+            var hips = bones["Hips"].position;
+            ShootAt($"{prefix}_waist_front", hips, root.forward, 1f);
+            ShootAt($"{prefix}_waist_back", hips, -root.forward + Vector3.up * 0.3f, 1f);
+            ShootAt($"{prefix}_waist_side", hips, -root.right, 1f);
+            ShootAt($"{prefix}_waist_below_back", hips, -root.forward - Vector3.up * 0.5f, 1f);
             log.AppendLine(line.ToString());
         }
 
@@ -187,6 +196,7 @@ public static class ProbeGearFeetShots
             input.move = Vector2.zero;
             input.sprint = false;
             input.jump = false;
+            shooter.AimInput = false;
             string result = error ?? $"{count} снимков в {Folder}\n{log}" +
                 (sink.Count > 0 ? $"подошва ниже земли: худшее {sink.Max():F0} мм\n" : "");
             File.WriteAllText(ResultPath, result);
