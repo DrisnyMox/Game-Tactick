@@ -16,7 +16,8 @@ using Object = UnityEngine.Object;
 //  1. анимациям Invector ставит аватар "из этой модели": их исходный аватар (vBot) не скопирован;
 //  2. материалы Invector переводит на URP: штатным обновлятелем URP, а старые шейдеры частиц - вручную;
 //  3. из префабов попаданий и следов убирает компоненты, у которых нет скрипта (скрипты Invector не копировались);
-//  4. собирает префаб винтовки SurvivorRifle из винтовки Invector и вешает на него ShooterWeapon;
+//  4. собирает префаб винтовки SurvivorRifle из винтовки Invector и вешает на него ShooterWeapon
+//     (модель Invector потом заменяет SetupScrapRifle.cs, его надо запустить следом);
 //  5. копирует контроллер аниматора Starter Assets и добавляет в копию: шаги с прицелом на базовый слой
 //     и слой "Rifle" для верха тела (держит, целится, выстрел, перезарядка);
 //  6. на PlayerSurvivor ставит новый контроллер и SurvivorShooter. Положение винтовки в правой кисти считает
@@ -34,7 +35,7 @@ public static class SetupSurvivorShooter
     const string AudioFolder = Invector + "Audio/Weapons/";
 
     const string SurvivorFolder = "Assets/Characters/Survivor/";
-    const string RiflePath = SurvivorFolder + "Weapons/SurvivorRifle.prefab";
+    const string RiflePath = "Assets/Weapons/SurvivorRifle.prefab";
     const string MaskPath = SurvivorFolder + "Animations/SurvivorUpperBody.mask";
     const string SourceController = "Assets/Starter Assets/Runtime/ThirdPersonController/Character/Animations/StarterAssetsThirdPerson.controller";
     const string ControllerPath = SurvivorFolder + "Animations/SurvivorShooter.controller";
@@ -46,7 +47,7 @@ public static class SetupSurvivorShooter
     public static string Main()
     {
         log = new StringBuilder();
-        EnsureFolder(SurvivorFolder + "Weapons");
+        EnsureFolder("Assets/Weapons");
         EnsureFolder(SurvivorFolder + "Animations");
 
         FixAnimationAvatars();

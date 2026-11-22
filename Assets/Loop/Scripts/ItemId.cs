@@ -13,4 +13,6 @@ public enum ItemId
     BigMagazine,
     ArmorBlueprint,
     BigMagazineBlueprint,
+    // Снаряжение, но в конце списка: номера предметов лежат в сохранениях
+    Grenade,
 }

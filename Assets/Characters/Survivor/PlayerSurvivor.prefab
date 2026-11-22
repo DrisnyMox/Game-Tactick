@@ -2059,6 +2059,7 @@ GameObject:
   - component: {fileID: 442947496309624678}
   - component: {fileID: 5883635562427296351}
   - component: {fileID: 7781584955266196869}
+  - component: {fileID: 5123757755794430735}
   m_Layer: 8
   m_Name: PlayerSurvivor
   m_TagString: Player
@@ -2322,11 +2323,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 05323930319f6a446bf3eadc4a826468, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SurvivorShooter
-  AimInput: 0
-  FireInput: 0
-  ReloadInput: 0
   botControlled: 0
-  AimTarget: {x: 0, y: 0, z: 0}
   weaponPrefab: {fileID: 4757919266640439653, guid: 636f9c16e1ede994a92216c7e5e64c5c, type: 3}
   weaponLocalPosition: {x: -0.06751459, y: 0.019626407, z: 0.0343138}
   weaponLocalEuler: {x: 336.56113, y: 286.00766, z: 349.4005}
@@ -2415,6 +2412,15 @@ MonoBehaviour:
   maxHealth: 100
   headMultiplier: 2
   deathImpulse: 8
+  minKnockTime: 1.5
+  maxKnockTime: 6
+  settleSpeed: 0.5
+  getUpTime: 0.7
+  breakSpeed: 6
+  breakRadius: 1.4
+  blastFlightTime: 2.5
+  knockedCameraLift: 0.6
+  fallLimitY: -20
 --- !u!114 &7781584955266196869
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2430,6 +2436,23 @@ MonoBehaviour:
   capacity: 120
   medkitHeal: 60
   medkitCooldown: 2
+--- !u!114 &5123757755794430735
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6039154663972180722}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fef9fea4ab1fb1149b24723ff49c6283, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GrenadeThrower
+  grenadePrefab: {fileID: 1750812862625817204, guid: 6ce745fec92915d4883d7231917da119, type: 3}
+  throwSpeed: 16
+  throwLift: 4
+  cooldown: 1
+  forwardOffset: 0.5
 --- !u!1 &6169901924289589089
 GameObject:
   m_ObjectHideFlags: 0

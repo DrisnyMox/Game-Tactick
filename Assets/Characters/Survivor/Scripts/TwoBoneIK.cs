@@ -1,6 +1,6 @@
 using UnityEngine;
 
-/// <summary>IK на две кости: левая ладонь стрелка на цевье винтовки (SurvivorShooter)</summary>
+/// <summary>IK на две кости: кисти стрелка на рукояти и цевье винтовки (SurvivorShooter)</summary>
 public static class TwoBoneIK
 {
     /// <summary>

@@ -15,7 +15,8 @@ using UnityEngine.SceneManagement;
 /// дальние точки захвата, ящики — у остальных точек. В двух ящиках чертежи.
 ///
 /// Во время вылазки: выпавший рюкзак становится мешком (Pickup) на месте; уничтоженный или эвакуированный
-/// рейдер через raiderRespawnDelay выходит на карту новым, с пустым рюкзаком. H — аптечка. Бег игрока шумит (Noise).
+/// рейдер через raiderRespawnDelay выходит на карту новым, с аптечкой и двумя гранатами. H — аптечка, G — граната
+/// (GrenadeThrower берёт гранаты из рюкзака). Бег игрока шумит (Noise).
 /// Игрок эвакуировался — рюкзак уходит на склад (Profile.Extract), уничтожен — рюкзак потерян, кроме защищённого
 /// кармана (ProtectedPocket, Profile.Lose).
 /// Итог на экране, затем сцена Base.
@@ -66,8 +67,11 @@ public class RaidDirector : MonoBehaviour
     readonly List<CharacterHealth> raiders = new();
     readonly Dictionary<CharacterHealth, float> respawnTimes = new();
     readonly List<CharacterHealth> due = new();
-    // Сколько патронов кладёт отладочная клавиша P
+    // Сколько патронов и гранат кладёт отладочная клавиша P
     const int DebugAmmo = 100;
+    const int DebugGrenades = 10;
+    // Сколько гранат у нового рейдера
+    const int RaiderGrenades = 2;
     // Игрок уничтожен: итог через столько секунд, когда тело уже упало
     const float LostSummaryDelay = 2.5f;
 
@@ -119,11 +123,13 @@ public class RaidDirector : MonoBehaviour
         if (carried[ItemId.BigMagazine] > 0)
             playerShooter.MagazineSize = bigMagazineSize;
         playerShooter.Reserve = playerBackpack;
+        player.GetComponent<GrenadeThrower>().Supply = playerBackpack;
 
         foreach (var character in CharacterHealth.All)
         {
             if (character == player)
                 continue;
+            character.GetComponent<GrenadeThrower>().Supply = character.GetComponent<Backpack>();
             if (!character.GetComponent<ShooterBot>().Raider)
                 Debug.LogError($"[Raid] {character.name}: ShooterBot не в режиме рейдера. Запусти Tools/Unity/SetupRaid.cs.", character);
             // Каждый рейдер сам за себя: своя команда, стреляет и в игрока, и в других рейдеров, слышит их шум
@@ -316,6 +322,7 @@ public class RaidDirector : MonoBehaviour
         }
         var kit = new ItemCounts();
         kit[ItemId.Medkit] = 1;
+        kit[ItemId.Grenade] = RaiderGrenades;
         raider.GetComponent<Backpack>().Load(kit);
         raider.Revive(position + Vector3.up * lift, Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
         raider.GetComponent<ShooterBot>().BeginRaid();
@@ -442,13 +449,15 @@ public class RaidDirector : MonoBehaviour
 
         if (state == State.Playing && Keyboard.current.hKey.wasPressedThisFrame)
             playerBackpack.UseMedkit();
-        // Отладка: P кладёт патроны в рюкзак. Только в редакторе и в development-сборке
+        // Отладка: P кладёт патроны и гранаты в рюкзак. Только в редакторе и в development-сборке
         if (Debug.isDebugBuild && state == State.Playing && Keyboard.current.pKey.wasPressedThisFrame)
         {
             playerBackpack.Add(ItemId.Ammo, DebugAmmo);
-            hud.Notify($"отладка: +{DebugAmmo} патронов");
+            playerBackpack.Add(ItemId.Grenade, DebugGrenades);
+            hud.Notify($"отладка: +{DebugAmmo} патронов, +{DebugGrenades} гранат");
         }
-        if (state == State.Playing && !arena.IsGenerating && arena.Layout.seaLevel > 0)
+        // Сбитый взрывом лежит рэгдоллом, его корень стоит на месте: возврат из глубины подождёт подъёма
+        if (state == State.Playing && !arena.IsGenerating && arena.Layout.seaLevel > 0 && !player.KnockedDown)
             KeepOutOfDeepWater();
         if (state == State.Playing && !arena.IsGenerating)
             MakeStepNoise();

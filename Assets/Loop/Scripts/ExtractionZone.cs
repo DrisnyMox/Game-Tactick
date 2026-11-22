@@ -74,7 +74,8 @@ public class ExtractionZone : MonoBehaviour
         foreach (var character in CharacterHealth.All)
         {
             var offset = character.transform.position - center;
-            bool there = !character.IsDead && Mathf.Abs(offset.y) < 4f &&
+            // Сбитый взрывом лежит не там, где его корень: отсчёт заново, когда встанет
+            bool there = !character.IsDead && !character.KnockedDown && Mathf.Abs(offset.y) < 4f &&
                          offset.x * offset.x + offset.z * offset.z <= radius * radius && Wants(character);
             if (!there)
             {

@@ -6,7 +6,7 @@ using UnityEngine;
 /// </summary>
 public static class Items
 {
-    public const int Count = 10;
+    public const int Count = 11;
 
     struct Info
     {
@@ -31,6 +31,7 @@ public static class Items
         new() { name = "Большой магазин", sellPrice = 20, color = new Color(0.55f, 0.55f, 0.7f) },
         new() { name = "Чертёж: бронежилет", color = new Color(0.4f, 0.7f, 1f) },
         new() { name = "Чертёж: большой магазин", color = new Color(0.4f, 0.7f, 1f) },
+        new() { name = "Граната", sellPrice = 6, color = new Color(0.55f, 0.75f, 0.35f) },
     };
 
     public static string Name(ItemId id) => info[(int)id].name;
@@ -40,9 +41,9 @@ public static class Items
     public static int VoxelsPerUnit(ItemId id) => info[(int)id].voxelsPerUnit;
 
     public static bool IsMaterial(ItemId id) => id <= ItemId.Tech;
-    public static bool IsBlueprint(ItemId id) => id >= ItemId.ArmorBlueprint;
+    public static bool IsBlueprint(ItemId id) => id == ItemId.ArmorBlueprint || id == ItemId.BigMagazineBlueprint;
     /// <summary>Снаряжение: его берут со склада в вылазку</summary>
-    public static bool IsGear(ItemId id) => id >= ItemId.Ammo && id <= ItemId.BigMagazine;
+    public static bool IsGear(ItemId id) => (id >= ItemId.Ammo && id <= ItemId.BigMagazine) || id == ItemId.Grenade;
     /// <summary>Бронежилет и магазин работают в одном экземпляре: второй в вылазку не берут</summary>
     public static bool IsSingle(ItemId id) => id == ItemId.Armor || id == ItemId.BigMagazine;
 

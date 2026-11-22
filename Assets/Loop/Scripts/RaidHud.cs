@@ -132,7 +132,9 @@ public sealed class RaidHud
             var id = (ItemId)i;
             if (items[id] <= 0 || id == ItemId.Ammo)
                 continue;
-            string text = id == ItemId.Medkit ? $"{Items.Name(id)} {items[id]}  [H]" : $"{Items.Name(id)} {items[id]}";
+            string text = id == ItemId.Medkit ? $"{Items.Name(id)} {items[id]}  [H]"
+                : id == ItemId.Grenade ? $"{Items.Name(id)} {items[id]}  [G]"
+                : $"{Items.Name(id)} {items[id]}";
             LoopGui.Shadowed(new Rect(20, y - line, 400, line), text, style, Items.Tint(id));
             y -= line;
         }

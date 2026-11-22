@@ -10,7 +10,8 @@ using UnityEngine.InputSystem;
 /// Геймпад: левый бампер - прицел, правый курок - огонь, X (west) - перезарядка.
 ///
 /// Как устроено:
-///  * винтовка висит на правой кисти, левую ладонь на цевье держит своя IK на две кости (аниматор её не трогает);
+///  * винтовка висит на правой кисти из анимации, после этого своя IK на две кости (TwoBoneIK) переносит
+///    правую кисть на пистолетную рукоять, а левую на цевьё, с поворотом кисти из точек rightHandIK и leftHandIK;
 ///  * верх тела играет позы Invector на слое аниматора "Rifle", параметр Aiming переключает "держит" и "целится";
 ///  * при прицеливании персонаж поворачивается туда же, куда камера, а грудь наклоняется за камерой вверх и вниз;
 ///  * пуля - луч из центра экрана; если между дулом и целью что-то есть, попадает в это;
@@ -32,6 +33,9 @@ public class SurvivorShooter : MonoBehaviour
     static readonly int ReloadId = Animator.StringToHash("Reload");
     static readonly int AimXId = Animator.StringToHash("AimX");
     static readonly int AimYId = Animator.StringToHash("AimY");
+    // Ближе этого (по направлению прицела от ствола) точку прицела грудь не доворачивает: у стены доворот к ней
+    // разворачивает корпус
+    const float MinAimFixDistance = 1f;
 
     /// <summary>Прицел зажат (ставит PlayerInput или ShooterBot)</summary>
     public bool AimInput { get; set; }
@@ -121,7 +125,8 @@ public class SurvivorShooter : MonoBehaviour
     Transform cam;
     Transform eye;
     ShooterWeapon weapon;
-    Transform spine, chest, leftUpperArm, leftLowerArm, leftHand;
+    Transform spine, chest, leftUpperArm, leftLowerArm, leftHand, rightUpperArm, rightLowerArm, rightHand;
+    Quaternion weaponLocalRotation;
     Collider[] ownColliders;
 
     float defaultMoveSpeed;
@@ -194,9 +199,12 @@ public class SurvivorShooter : MonoBehaviour
         leftLowerArm = animator.GetBoneTransform(HumanBodyBones.LeftLowerArm);
         leftHand = animator.GetBoneTransform(HumanBodyBones.LeftHand);
 
-        var rightHand = animator.GetBoneTransform(HumanBodyBones.RightHand);
+        rightUpperArm = animator.GetBoneTransform(HumanBodyBones.RightUpperArm);
+        rightLowerArm = animator.GetBoneTransform(HumanBodyBones.RightLowerArm);
+        rightHand = animator.GetBoneTransform(HumanBodyBones.RightHand);
         weapon = Instantiate(weaponPrefab, rightHand);
-        weapon.transform.SetLocalPositionAndRotation(weaponLocalPosition, Quaternion.Euler(weaponLocalEuler));
+        weaponLocalRotation = Quaternion.Euler(weaponLocalEuler);
+        weapon.transform.SetLocalPositionAndRotation(weaponLocalPosition, weaponLocalRotation);
 
         defaultMoveSpeed = controller.MoveSpeed;
         ammo = magazineSize;
@@ -231,6 +239,9 @@ public class SurvivorShooter : MonoBehaviour
 
     void Update()
     {
+        // Сбит с ног взрывом: компонент включён только ради HUD (OnGUI), кости ведёт рэгдолл, а потом подъём
+        if (health.KnockedDown)
+            return;
         bool fireHeld = FireInput;
 
         if (Reloading && Time.time >= reloadEndTime)
@@ -336,6 +347,11 @@ public class SurvivorShooter : MonoBehaviour
 
     void LateUpdate()
     {
+        if (health.KnockedDown)
+            return;
+        // Винтовку держит кисть из анимации: её положение задаёт, куда смотрит ствол. Прошлый кадр сдвинул
+        // кисть на рукоять (ниже), поэтому винтовку снова ставим по кисти из анимации этого кадра
+        weapon.transform.SetLocalPositionAndRotation(weaponLocalPosition, weaponLocalRotation);
         var look = AimDirection();
 
         if (aimWeight > 0f)
@@ -348,9 +364,13 @@ public class SurvivorShooter : MonoBehaviour
 
             // Довернуть грудь, чтобы ствол смотрел в точку под прицелом. Винтовка висит на правой кисти,
             // кисть на груди, поэтому поворот груди поворачивает ствол так же
+            // У стены точка прицела оказывается рядом со стволом или за ним, и доворот развернул бы грудь
+            // почти на 180°. Тогда ствол просто смотрит туда же, куда прицел
             var muzzle = weapon.Muzzle;
-            var target = AimPoint();
-            var fix = Quaternion.FromToRotation(muzzle.forward, target - muzzle.position);
+            var toTarget = AimPoint() - muzzle.position;
+            if (Vector3.Dot(toTarget, look) < MinAimFixDistance)
+                toTarget = look;
+            var fix = Quaternion.FromToRotation(muzzle.forward, toTarget);
             chest.rotation = Quaternion.Slerp(Quaternion.identity, fix, aimWeight) * chest.rotation;
         }
 
@@ -360,10 +380,22 @@ public class SurvivorShooter : MonoBehaviour
         if (kick > 0.01f)
             chest.rotation = Quaternion.AngleAxis(-kick, transform.right) * chest.rotation;
 
+        // Позы Invector сделаны под другую винтовку и другие руки: кисть из анимации не обхватывает рукоять.
+        // Винтовка уже стоит где надо, кисть переносится на рукоять (точка rightHandIK), а винтовка остаётся на месте
+        weapon.transform.GetPositionAndRotation(out var weaponPosition, out var weaponRotation);
+        TwoBoneIK.Solve(rightUpperArm, rightLowerArm, rightHand, weapon.RightHandGrip.position, 1f);
+        rightHand.rotation = weapon.RightHandGrip.rotation;
+        weapon.transform.SetPositionAndRotation(weaponPosition, weaponRotation);
+
         // Во время перезарядки левая рука работает по анимации Reload_Rifle
         float gripWeight = Reloading ? 0f : 1f;
         if (gripWeight > 0f)
+        {
             TwoBoneIK.Solve(leftUpperArm, leftLowerArm, leftHand, weapon.LeftHandGrip.position, gripWeight);
+            // Поворот кисти из анимации подходит под цевьё Invector, а не под эту винтовку.
+            // Точка leftHandIK хранит и поворот кисти: ладонь снизу, пальцы обхватывают цевьё
+            leftHand.rotation = Quaternion.Slerp(leftHand.rotation, weapon.LeftHandGrip.rotation, gripWeight);
+        }
     }
 
     /// <summary>Полный магазин, перезарядка прервана (возрождение)</summary>

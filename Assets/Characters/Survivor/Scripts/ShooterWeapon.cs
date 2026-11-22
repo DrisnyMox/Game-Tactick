@@ -4,7 +4,8 @@ using UnityEngine.Serialization;
 /// <summary>
 /// Винтовка выжившего: точки на модели и эффекты выстрела.
 /// Стрельбу ведёт SurvivorShooter, а этот компонент только показывает выстрел: вспышку у дула, свет, гильзу и звук.
-/// Префаб собирает Tools/Unity/SetupSurvivorShooter.cs из винтовки Invector.
+/// Префаб собирает Tools/Unity/SetupSurvivorShooter.cs из винтовки Invector (точки, частицы, звук),
+/// а модель ScrapRifle вместо модели Invector ставит Tools/Unity/SetupScrapRifle.cs.
 /// </summary>
 public class ShooterWeapon : MonoBehaviour
 {
@@ -12,9 +13,12 @@ public class ShooterWeapon : MonoBehaviour
     [FormerlySerializedAs("Muzzle")]
     [SerializeField] Transform muzzle;
 
-    [Tooltip("Точка на цевье, куда SurvivorShooter ставит левую ладонь")]
+    [Tooltip("Положение и поворот кости левой кисти на цевье: туда SurvivorShooter ставит левую ладонь")]
     [FormerlySerializedAs("LeftHandGrip")]
     [SerializeField] Transform leftHandGrip;
+
+    [Tooltip("Положение и поворот кости правой кисти на пистолетной рукояти: туда SurvivorShooter переносит кисть")]
+    [SerializeField] Transform rightHandGrip;
 
     [Tooltip("Вспышка и дым у дула: перезапускаются на каждый выстрел")]
     [SerializeField] ParticleSystem[] muzzleParticles;
@@ -33,6 +37,7 @@ public class ShooterWeapon : MonoBehaviour
 
     public Transform Muzzle => muzzle;
     public Transform LeftHandGrip => leftHandGrip;
+    public Transform RightHandGrip => rightHandGrip;
     public AudioSource Audio => audioSource;
 
     void Awake()

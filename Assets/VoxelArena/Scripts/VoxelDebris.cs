@@ -38,6 +38,12 @@ public class VoxelDebris : MonoBehaviour
     [SerializeField] float spin = 540f;
     [Tooltip("Время жизни кубика, с (случайно от x до y)")]
     [SerializeField] Vector2 lifetime = new(0.8f, 1.6f);
+    [Tooltip("Взрыв (VoxelArena.DebrisPower больше 1): время жизни растёт на эту долю за каждую единицу силы сверх 1, " +
+             "чтобы кубики успели долететь")]
+    [SerializeField] float lifetimePerPower = 0.2f;
+    [Tooltip("Взрыв: во сколько раз меньше кубиков на воксель, чем piecesPerVoxel. Граната выбивает сотни вокселей, " +
+             "полное число кубиков сплошь засыпает экран")]
+    [SerializeField] float blastPiecesDivisor = 3f;
 
     new ParticleSystem particleSystem;
     Color32[] palette;
@@ -88,7 +94,12 @@ public class VoxelDebris : MonoBehaviour
             for (int i = 0; i < total; i++)
                 places[i] = i;
         }
-        int count = Mathf.Min(piecesPerVoxel, total);
+        // Взрыв: кубиков на воксель меньше, скорость разлёта и подброс умножаются на силу, кубики живут дольше
+        float power = arena.DebrisPower;
+        bool blast = power > 1f;
+        int perVoxel = blast ? Mathf.Max(1, Mathf.RoundToInt(piecesPerVoxel / blastPiecesDivisor)) : piecesPerVoxel;
+        int count = Mathf.Min(perVoxel, total);
+        float life = 1f + lifetimePerPower * (power - 1f);
 
         foreach (var voxelInfo in removed)
         {
@@ -107,13 +118,17 @@ public class VoxelDebris : MonoBehaviour
                 emit.startColor = y == n - 1 ? top : side;
                 var position = origin + new Vector3(x + 0.5f, y + 0.5f, z + 0.5f) * cell;
                 var away = position - center;
+                // Граната лежит на земле, и почти вся воронка ниже неё: от центра кубики летели бы в грунт.
+                // У взрыва они вылетают из воронки вверх и в стороны
+                if (blast)
+                    away.y = Mathf.Abs(away.y);
                 away = away.sqrMagnitude > 1e-6f ? away.normalized : Random.onUnitSphere;
                 emit.position = position;
-                emit.velocity = away * Random.Range(speed.x, speed.y) +
-                                Vector3.up * Random.Range(upSpeed.x, upSpeed.y) +
+                emit.velocity = (away * Random.Range(speed.x, speed.y) +
+                                 Vector3.up * Random.Range(upSpeed.x, upSpeed.y)) * power +
                                 Random.insideUnitSphere * scatter;
                 emit.angularVelocity3D = Random.insideUnitSphere * spin;
-                emit.startLifetime = Random.Range(lifetime.x, lifetime.y);
+                emit.startLifetime = Random.Range(lifetime.x, lifetime.y) * life;
                 particleSystem.Emit(emit, 1);
             }
         }

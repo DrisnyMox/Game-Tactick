@@ -17,7 +17,9 @@ using UnityEngine.AI;
 ///  * стреляет очередями после задержки реакции, прицел плавно гуляет вокруг груди цели на spreadDegrees;
 ///  * упёрся в уступ (хочет идти, а стоит на месте) - прыгает;
 ///  * расходится с союзниками ближе separation, чтобы команда не бежала одной толпой;
-///  * рейдер слышит шум врага (Noise: выстрел, бег) и идёт проверить место, осматриваясь investigateTime.
+///  * рейдер слышит шум врага (Noise: выстрел, бег, взрыв) и идёт проверить место, осматриваясь investigateTime;
+///  * раз в grenadeInterval бросает гранату (GrenadeThrower) в цель на средней дистанции, а в спрятавшуюся —
+///    навесом туда, где видел её последний раз.
 /// Компонент и ссылки ставит Tools/Unity/SetupArenaBot.cs.
 /// </summary>
 // Раньше ThirdPersonController: ввод этого кадра должен быть готов к его Update
@@ -71,7 +73,20 @@ public class ShooterBot : MonoBehaviour
     [Tooltip("Сколько секунд рейдер проверяет место, где услышал врага (Noise): идёт туда и осматривается")]
     [SerializeField] float investigateTime = 12f;
 
+    [Header("Гранаты")]
+    [Tooltip("Ближе этого к цели граната не летит: взрыв задел бы самого бота, м")]
+    [SerializeField] float grenadeMinDistance = 10f;
+    [Tooltip("Дальше этого граната не долетает (GrenadeThrower.throwSpeed 16 м/с — до 26 м по ровному), м")]
+    [SerializeField] float grenadeMaxDistance = 24f;
+    [Tooltip("Пауза между бросками, с. Первый бросок после выхода на карту — не раньше половины паузы")]
+    [SerializeField] Vector2 grenadeInterval = new(12f, 25f);
+    [Tooltip("Бросает в цель, которую видел не позже стольких секунд назад: туда, где видел")]
+    [SerializeField] float grenadeMemory = 3f;
+    [Tooltip("Насколько граната ложится мимо точки, м")]
+    [SerializeField] float grenadeScatter = 1.5f;
+
     SurvivorShooter shooter;
+    GrenadeThrower thrower;
     StarterAssetsInputs input;
     CharacterController controller;
     CharacterHealth self;
@@ -97,6 +112,7 @@ public class ShooterBot : MonoBehaviour
     float nextStrafeFlip;
     float stuckTime;
     float noiseSeed;
+    float nextGrenade;
 
     // Рейдер
     Backpack backpack;
@@ -122,7 +138,11 @@ public class ShooterBot : MonoBehaviour
         raidStart = Time.time;
         gatherSpot = -1;
         heardUntil = float.NegativeInfinity;
+        DelayFirstGrenade();
     }
+
+    // Только что вышедший на карту бот не бросает гранату сразу
+    void DelayFirstGrenade() => nextGrenade = Time.time + Random.Range(grenadeInterval.x, grenadeInterval.y) * 0.5f;
 
     /// <summary>Рейдер проверяет место, где слышал врага</summary>
     public bool Investigating => raider && Time.time < heardUntil;
@@ -146,6 +166,7 @@ public class ShooterBot : MonoBehaviour
     void Awake()
     {
         shooter = GetComponent<SurvivorShooter>();
+        thrower = GetComponent<GrenadeThrower>();
         input = GetComponent<StarterAssetsInputs>();
         controller = GetComponent<CharacterController>();
         self = GetComponent<CharacterHealth>();
@@ -153,6 +174,7 @@ public class ShooterBot : MonoBehaviour
         ownColliders = GetComponentsInChildren<Collider>(true);
         noiseSeed = Random.value * 100f;
         path = new NavMeshPath();
+        DelayFirstGrenade();
     }
 
     void Start()
@@ -224,6 +246,7 @@ public class ShooterBot : MonoBehaviour
         if (!firing && burstEnd >= nextBurst && Time.time >= burstEnd)
             nextBurst = Time.time + Random.Range(burstPause.x, burstPause.y);
         shooter.FireInput = firing;
+        TryGrenade(sees);
 
         // Движение
         Vector3 move;
@@ -292,6 +315,26 @@ public class ShooterBot : MonoBehaviour
         seenSince = -1f;
         lastSeenTime = float.NegativeInfinity;
         nextRepath = 0f;
+    }
+
+    // Граната в цель: туда, где она сейчас (видна — низкой дугой) или где её видели последний раз (за укрытием —
+    // навесом). Не ближе grenadeMinDistance и не дальше grenadeMaxDistance, не под ноги союзникам
+    void TryGrenade(bool sees)
+    {
+        if (Time.time < nextGrenade || Time.time - lastSeenTime > grenadeMemory || !thrower.CanThrow)
+            return;
+        var point = sees ? target.transform.position : lastSeenPosition;
+        float distance = Flat(point - transform.position).magnitude;
+        if (distance < grenadeMinDistance || distance > grenadeMaxDistance)
+            return;
+        foreach (var other in CharacterHealth.All)
+            if (other != self && other.Team == self.Team && !other.IsDead &&
+                Vector3.Distance(other.transform.position, point) < thrower.BlastRadius)
+                return;
+
+        var scatter = Random.insideUnitCircle * grenadeScatter;
+        if (thrower.ThrowAt(point + new Vector3(scatter.x, 0f, scatter.y), !sees))
+            nextGrenade = Time.time + Random.Range(grenadeInterval.x, grenadeInterval.y);
     }
 
     // Шаг в сторону от союзников, которые ближе separation

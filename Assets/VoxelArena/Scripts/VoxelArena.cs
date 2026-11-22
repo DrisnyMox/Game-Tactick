@@ -68,6 +68,12 @@ public partial class VoxelArena : MonoBehaviour
     public event Action<Vector3, List<RemovedVoxel>> VoxelsRemoved;
     readonly List<RemovedVoxel> removedVoxels = new();
 
+    /// <summary>
+    /// Сила разлёта осколков у выбивания, о котором сейчас сообщает VoxelsRemoved: 1 — пуля и обвал, больше — взрыв.
+    /// Читать внутри обработчика VoxelsRemoved (VoxelDebris), вне его значение от прошлого выбивания
+    /// </summary>
+    public float DebrisPower { get; private set; } = 1f;
+
     public int3 Dims => dims;
     public Material Material => material;
     public Material WaterMaterial => waterMaterial;
@@ -292,9 +298,9 @@ public partial class VoxelArena : MonoBehaviour
     /// <summary>
     /// Выбивает воксели шаром (во время генерации — ничего). Возвращает число выбитых. maxDepth — на сколько вокселей ниже исходной
     /// поверхности столбца можно копать (воронки в бою — на 1: агент перешагивает уступ в один воксель,
-    /// глубже — поле воронок становится непроходимым и отрезает базу)
+    /// глубже — поле воронок становится непроходимым и отрезает базу). debrisPower — сила разлёта осколков (DebrisPower)
     /// </summary>
-    public int Explode(Vector3 worldCenter, float worldRadius, int maxDepth = int.MaxValue)
+    public int Explode(Vector3 worldCenter, float worldRadius, int maxDepth = int.MaxValue, float debrisPower = 1f)
     {
         // Пока идёт генерация, воксели пишут её джобы: выстрел в старую карту ничего не выбивает
         if (IsGenerating)
@@ -338,6 +344,7 @@ public partial class VoxelArena : MonoBehaviour
         if (removed > 0)
         {
             MarkVoxelRangeDirty(min, max);
+            DebrisPower = debrisPower;
             VoxelsRemoved?.Invoke(worldCenter, removedVoxels);
         }
 
@@ -376,7 +383,10 @@ public partial class VoxelArena : MonoBehaviour
             MarkVoxelRangeDirty(min, max);
             // Обвал участка: куски разлетаются от его середины
             if (removedVoxels.Count > 0)
+            {
+                DebrisPower = 1f;
                 VoxelsRemoved?.Invoke(VoxelToWorld((float3)(min + max + 1) * 0.5f), removedVoxels);
+            }
         }
     }
 

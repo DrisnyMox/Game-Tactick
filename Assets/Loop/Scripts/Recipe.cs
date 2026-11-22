@@ -11,6 +11,7 @@ public sealed class Recipe
     {
         new() { result = ItemId.Ammo, amount = 30, cost = new[] { (ItemId.Scrap, 3), (ItemId.Stone, 2) } },
         new() { result = ItemId.Medkit, cost = new[] { (ItemId.Wood, 6), (ItemId.Scrap, 1) } },
+        new() { result = ItemId.Grenade, amount = 2, cost = new[] { (ItemId.Scrap, 4), (ItemId.Stone, 2) } },
         new() { result = ItemId.Armor, cost = new[] { (ItemId.Scrap, 10), (ItemId.Wood, 6) }, blueprint = ItemId.ArmorBlueprint },
         new() { result = ItemId.BigMagazine, cost = new[] { (ItemId.Scrap, 5), (ItemId.Tech, 2) }, blueprint = ItemId.BigMagazineBlueprint },
     };
