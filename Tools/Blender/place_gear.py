@@ -1,16 +1,17 @@
 """
 Ставит жёсткую часть снаряжения из генератора на тело Assets/Models/20261121003938_8b8745d5.fbx без смены формы.
-Первая такая часть - ботинки ClothBoots из модели одного ботинка.
+Такие части - ботинки ClothBoots и NomadBoots, каждые из модели одного ботинка.
 
 Запуск (из корня проекта):
     "E:\\Software\\Blender\\blender.exe" --background --factory-startup --python Tools/Blender/place_gear.py -- ^
         --part boots --src "<FBX ботинка>" --out Assets/Models/Gear/ClothBoots.fbx [--png "<папка>"]
+    (NomadBoots: --part nomad_boots --out Assets/Models/Gear/NomadBoots.fbx)
 
 Что делает (вершины по одной не двигает: на нагруднике это смяло ремни и шнуровку):
   * ботинок - все куски модели (сам ботинок, ремни, шнурки). Носок модели смотрит в -Y;
   * масштаб по замеру ступни тела: длина и ширина ступни вдоль её оси плюс зазоры, высота - средним из двух.
     Ботинок поворачивается по оси ступни (носки у тела развёрнуты наружу) и ставится подошвой на пол;
-  * голенище - отдельно: выше подъёма ботинок плавно вытягивается вверх до CAP_Z, сдвигается на центр голени
+  * голенище - отдельно: выше подъёма ботинок плавно вытягивается вверх до cap_z, сдвигается на центр голени
     и расширяется, если голень ближе SHAFT_GAP к стенке. Так голенище по голени, а носок по ступне;
   * модель - сплошная оболочка, голенище сверху закрыто неглубокой чашей. Голень входит в эту чашу: щели между
     голенью и голенищем не видно, и позже туда же уйдёт низ штанин;
@@ -44,17 +45,25 @@ from gear_poses import POSES, RECORDED, SKIN_BONES, limit_bones, set_pose  # noq
 BODY_PATH = 'Assets/Models/20261121003938_8b8745d5.fbx'
 
 # side - сторона, на которую надевается модель (вторая - отражением); main - кусок модели с самим ботинком;
-# shaft_z - высоты модели (её единицы), между которыми голенище плавно переходит от ступни к голени
+# shaft_z - высоты модели (её единицы), между которыми голенище плавно переходит от ступни к голени;
+# cap_z - высота чаши голенища на теле (None - как у модели, без вытягивания); cap_src - высота дна чаши в единицах
+# модели, если чаша не самое частое по высоте в голенище (у высокого голенища по медиане вышла бы середина голенища);
+# remove_unseen - убрать грани, которых не видно снаружи ни с одной стороны
 PARTS = {
-    'boots': dict(side='Right', main='part_000', shaft_z=(0.25, 0.5)),
+    'boots': dict(side='Right', main='part_000', shaft_z=(0.25, 0.5), cap_z=0.135),
+    # NomadBoots: голенище по замыслу высокое, у модели оно уже на треть голени - чаша на своей высоте. Внутри голенища
+    # у модели поперёк вторая перепонка (52 грани на высоте обмотки): снаружи её не видно, но лучи от голени
+    # упираются в неё, и голенище раздувало бы, а проверка «внутри ботинка» по чётности пересечений ошибалась бы
+    'nomad_boots': dict(side='Right', main='part_000', shaft_z=(0.25, 0.5), cap_z=None, cap_src=0.73,
+                        remove_unseen=True),
 }
 TOE_GAP = 0.010       # носок ботинка впереди пальцев тела, м (рост тела 1,088; в Unity умножается на 1,662)
 HEEL_GAP = 0.006      # пятка ботинка позади пятки тела
 SIDE_GAP = 0.006      # ботинок шире ступни на столько с каждой стороны
 SHAFT_GAP = 0.004     # стенка голенища не ближе к голени
-# Чаша голенища - выше кольца голени тела на 117 мм (рост 1,088). Ниже него кожа весит частью на стопе, и треугольник
-# от щиколотки до этого кольца при сгибе стопы выпирал бугром над задником. Выше - только на голени, как голенище
-CAP_Z = 0.135
+# Чаша голенища (cap_z в PARTS) - не ниже кольца голени тела на 115 мм (рост 1,088). Ниже него кожа весит частью
+# на стопе, и треугольник от щиколотки до этого кольца при сгибе стопы выпирал бугром над задником. Выше - только
+# на голени, как голенище
 HIDE_BELOW = 0.010    # кожа голени прячется ниже чаши голенища на столько: у края она уходит в чашу
 TEXTURE_SIZE = 1024
 SAMPLES = ((1 / 3, 1 / 3, 1 / 3), (0.6, 0.2, 0.2), (0.2, 0.6, 0.2), (0.2, 0.2, 0.6),
@@ -107,6 +116,42 @@ gen_view = gen.copy()
 gen_view.data = gen.data.copy()
 bpy.context.scene.collection.objects.link(gen_view)
 gen_view.hide_render = True
+
+
+def remove_unseen(o):
+    """Убирает грани, которых не видно снаружи: ни из одной из 600 сторон луч к центру грани и к точкам у её углов
+    не попадает в неё первой."""
+    bm = bmesh.new()
+    bm.from_mesh(o.data)
+    bm.faces.ensure_lookup_table()
+    tree = BVHTree.FromBMesh(bm)
+    n = 600
+    dirs = []
+    for k in range(n):
+        z = 1 - 2 * (k + 0.5) / n
+        r = math.sqrt(1 - z * z)
+        a = k * math.pi * (3 - math.sqrt(5))
+        dirs.append(Vector((r * math.cos(a), r * math.sin(a), z)))
+
+    def seen(f):
+        c = f.calc_center_median()
+        for p in [c] + [c.lerp(vtx.co, 0.6) for vtx in f.verts]:
+            for d in dirs:
+                hit = tree.ray_cast(p + d * 2, -d, 2.5)
+                if hit[0] is not None and (hit[2] == f.index or (hit[0] - p).length < 1e-6):
+                    return True
+        return False
+
+    drop = [f for f in bm.faces if not seen(f)]
+    zs = [f.calc_center_median().z for f in drop]
+    print(f'[Place] unseen faces removed: {len(drop)}' + (f' at model z {min(zs):.3f}..{max(zs):.3f}' if drop else ''))
+    bmesh.ops.delete(bm, geom=drop, context='FACES')
+    bm.to_mesh(o.data)
+    bm.free()
+
+
+if cfg.get('remove_unseen'):
+    remove_unseen(gen)
 bpy.ops.object.select_all(action='DESELECT')
 for o in pieces:
     o.select_set(True)
@@ -160,14 +205,26 @@ z0, z1 = cfg['shaft_z']
 s = np.clip((src_co[:, 2] - z0) / (z1 - z0), 0, 1)
 t = s * s * (3 - 2 * s)
 band = [i for i in main_verts if src_co[i, 2] >= z1]
-cap_z = float(np.percentile(co[band, 2], 50))  # высота чаши голенища (её края выше)
-# Голенище выше подъёма вытягивается вверх так, чтобы чаша встала на CAP_Z: растяжение растёт по высоте
+
+
+def cap_height():
+    """Высота чаши голенища (её края выше): заданное дно чаши модели или медиана голенища."""
+    if 'cap_src' in cfg:
+        sc = min((cfg['cap_src'] - z0) / (z1 - z0), 1.0)
+        return (cfg['cap_src'] - src_co[:, 2].min()) * sz + k * (h * (sc ** 3 - sc ** 4 / 2) + (cfg['cap_src'] - z1) * sz)
+    return float(np.percentile(co[band, 2], 50))
+
+
+# Голенище выше подъёма вытягивается вверх так, чтобы чаша встала на cap_z: растяжение растёт по высоте
 # вместе с t (интеграл t), поэтому излома нет, а подошва и носок не меняются
 h = (z1 - z0) * sz
 lift = h * (s ** 3 - s ** 4 / 2) + np.maximum(src_co[:, 2] - z1, 0) * sz
-k = (CAP_Z - cap_z) / (h / 2 + cap_z - (z1 - src_co[:, 2].min()) * sz)
-co[:, 2] += k * lift
-cap_z = float(np.percentile(co[band, 2], 50))
+k = 0.0
+cap_z = cap_height()
+if cfg['cap_z'] is not None:
+    k = (cfg['cap_z'] - cap_z) / (h / 2 + cap_z - (z1 - src_co[:, 2].min()) * sz)
+    co[:, 2] += k * lift
+    cap_z = cap_height()
 print(f'[Place] shaft stretched up by {k * 100:.0f} %: cap at {cap_z * 1000:.1f} mm, top {co[:, 2].max() * 1000:.1f} mm')
 shaft_c = Vector(((co[band, 0].max() + co[band, 0].min()) / 2, (co[band, 1].max() + co[band, 1].min()) / 2, 0))
 # голень: кольцо кожи ноги над чашей и под ней - центр по рамке их точек
@@ -310,7 +367,8 @@ def evaluated(o):
     return a @ mw[:3, :3].T + mw[:3, 3]
 
 
-RAY = Vector((0.31, 0.17, 0.93)).normalized()
+# вверх и в две стороны: у модели с лишней гранью внутри один луч может ошибиться, решает большинство
+RAYS = [Vector(d).normalized() for d in ((0.31, 0.17, 0.93), (0.9, 0.35, 0.12), (-0.45, -0.87, 0.2))]
 
 
 def inside(bvh_, p):
@@ -319,14 +377,17 @@ def inside(bvh_, p):
     loc, _, _, dist = bvh_.find_nearest(p, 0.05)
     if loc is None:
         return False, 0.0
-    hits, o = 0, p.copy()
-    while True:
-        hit = bvh_.ray_cast(o, RAY, 0.5)
-        if hit[0] is None:
-            break
-        hits += 1
-        o = hit[0] + RAY * 1e-5
-    return hits % 2 == 1, dist
+    odd = 0
+    for ray in RAYS:
+        hits, o = 0, p.copy()
+        while True:
+            hit = bvh_.ray_cast(o, ray, 0.5)
+            if hit[0] is None:
+                break
+            hits += 1
+            o = hit[0] + ray * 1e-5
+        odd += hits % 2
+    return odd * 2 > len(RAYS), dist
 
 
 def point(pos, tri, w):

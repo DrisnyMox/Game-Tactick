@@ -5,8 +5,8 @@ using UnityEditor;
 using UnityEngine;
 
 // Надевает части снаряжения из Assets/Models/Gear на игрока (вариант PlayerSurvivor8b8745d5).
-// Части готовят Tools/Blender/fit_gear.py (подгонка), cut_gear.py (вырезание из тела), place_gear.py или place_pants.py
-// (жёсткая часть без смены формы): <часть>.fbx (меш на скелете тела), <часть>_Textures, <часть>_BodyMask.json (вершины тела под частью, координаты Blender).
+// Части готовят Tools/Blender/fit_gear.py (подгонка), cut_gear.py (вырезание из тела), place_gear.py (жёсткая часть
+// без смены формы), place_pants.py или place_chest.py (меш, вырезанный из модели генератора): <часть>.fbx (меш на скелете тела), <часть>_Textures, <часть>_BodyMask.json (вершины тела под частью, координаты Blender).
 //  1. материал URP Lit из текстур части; металл с гладкостью fit_gear.py уже свёл в одну картинку;
 //  2. импорт FBX части с масштабом модели тела: тогда позы покоя костей части (bindposes) совпадают с телом,
 //     и кости привязываются по именам без пересчёта. Совпадение проверяется;
@@ -25,9 +25,14 @@ public static class SetupGear
     const string VariantPath = "Assets/Characters/Survivor/PlayerSurvivor8b8745d5.prefab";
     const string BodyName = "Survivor_Body";
     const int MaxTextureSize = 2048;
-    // ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots ставит без смены
-    // формы place_gear.py, ClothPantsRope - place_pants.py: файлы у всех одинаковые
-    static readonly string[] Parts = { "ClothChest", "ClothGloves", "ClothBoots", "ClothPantsRope" };
+    // Надетые части. ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots
+    // и NomadBoots ставит без смены формы place_gear.py, ClothPantsRope - place_pants.py, NomadChest - place_chest.py:
+    // файлы у всех одинаковые. Части из Folder, которых здесь нет (например ClothBoots и ClothChest, пока надеты
+    // NomadBoots и NomadChest), с варианта снимаются
+    static readonly string[] Parts = { "NomadChest", "ClothGloves", "NomadBoots", "ClothPantsRope" };
+    // Части из одного слоя ткани с открытыми краями: у NomadChest между поясом-обмоткой и подолом, у горловины
+    // и под накидкой видна изнанка. С одной стороной граней в эти щели был виден фон (тело под частью спрятано)
+    static readonly string[] DoubleSided = { "NomadChest" };
 
     // Заполняет JsonUtility
 #pragma warning disable CS0649
@@ -60,6 +65,18 @@ public static class SetupGear
             throw new System.InvalidOperationException($"{VariantPath}: тело {body.sharedMesh.name}, а не меш {BodyModelPath}");
         var own = root.GetComponentsInChildren<Transform>(true).GroupBy(t => t.name).ToDictionary(g => g.Key, g => g.First());
         var pieces = new List<(SkinnedMeshRenderer renderer, int[] hidden)>();
+
+        // Снятые части: в папке есть, в Parts нет
+        foreach (var path in AssetDatabase.FindAssets("t:Model", new[] { Folder.TrimEnd('/') }).Select(AssetDatabase.GUIDToAssetPath))
+        {
+            var name = System.IO.Path.GetFileNameWithoutExtension(path);
+            var child = root.transform.Find(name);
+            if (!Parts.Contains(name) && child != null)
+            {
+                Object.DestroyImmediate(child.gameObject);
+                log.AppendLine($"{name}: снята");
+            }
+        }
 
         foreach (var part in Parts)
         {
@@ -206,6 +223,9 @@ public static class SetupGear
         mat.SetTexture("_MetallicGlossMap", AssetDatabase.LoadAssetAtPath<Texture2D>(Tex("_metallic_smoothness")));
         mat.EnableKeyword("_METALLICSPECGLOSSMAP");
         mat.SetFloat("_Smoothness", 1f);
+        bool twoSided = DoubleSided.Contains(part);
+        mat.SetFloat("_Cull", (float)(twoSided ? UnityEngine.Rendering.CullMode.Off : UnityEngine.Rendering.CullMode.Back));
+        mat.doubleSidedGI = twoSided;
         EditorUtility.SetDirty(mat);
         return mat;
     }

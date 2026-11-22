@@ -18,7 +18,6 @@ public static class ProbeGearFeetShots
 {
     const string Folder = "Temp/GearShots";
     const string ResultPath = "Temp/ProbeGearFeetShots.txt";
-    const string Part = "ClothBoots";
     const int Size = 640;
     const float ClearAhead = 25f;
     const int HitboxLayer = 6;  // кости рэгдолла самого игрока
@@ -80,7 +79,8 @@ public static class ProbeGearFeetShots
             root = shooter.transform;
             input = shooter.GetComponent<StarterAssetsInputs>();
             controller = shooter.GetComponent<ThirdPersonController>();
-            boots = root.Find(Part).GetComponent<SkinnedMeshRenderer>();
+            // надетые ботинки - ClothBoots или NomadBoots (SetupGear.cs ставит одни)
+            boots = root.Cast<Transform>().Single(t => t.name.EndsWith("Boots")).GetComponent<SkinnedMeshRenderer>();
             bones = root.GetComponentsInChildren<Transform>(true).GroupBy(t => t.name).ToDictionary(g => g.Key, g => g.First());
             start = root.position;
             float yaw = Enumerable.Range(0, 24).Select(k => k * 15f).First(a => IsClear(Quaternion.Euler(0f, a, 0f) * root.forward));
