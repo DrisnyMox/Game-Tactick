@@ -84,10 +84,26 @@ def recorded_targets(arm_obj, name):
     return target
 
 
+def _disconnect(arm_obj):
+    """Отсоединяет кости от родителя. У соединённой кости Blender не берёт сдвиг из позы, а в игре Humanoid
+    растягивает ноги (голова кости уходит от конца родителя до 7 мм): без этого ступни расходились с игрой
+    до 12 мм. Поза покоя не меняется."""
+    if not any(b.use_connect for b in arm_obj.data.bones):
+        return
+    active, mode = bpy.context.view_layer.objects.active, arm_obj.mode
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    for eb in arm_obj.data.edit_bones:
+        eb.use_connect = False
+    bpy.ops.object.mode_set(mode=mode)
+    bpy.context.view_layer.objects.active = active
+
+
 def set_pose(arm_obj, name):
     """Ставит скелет в позу name (tpose - поза покоя)."""
     if any(abs(a - b) > 1e-5 for ra, rb in zip(arm_obj.matrix_world, Matrix.Identity(4)) for a, b in zip(ra, rb)):
         raise RuntimeError('armature must stay at the origin without rotation')
+    _disconnect(arm_obj)
     for pb in arm_obj.pose.bones:
         pb.matrix_basis = Matrix.Identity(4)
     bpy.context.view_layer.update()

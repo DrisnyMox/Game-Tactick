@@ -5,8 +5,8 @@ using UnityEditor;
 using UnityEngine;
 
 // Надевает части снаряжения из Assets/Models/Gear на игрока (вариант PlayerSurvivor8b8745d5).
-// Части готовят Tools/Blender/fit_gear.py (подгонка) или cut_gear.py (вырезание из тела): <часть>.fbx (меш
-// на скелете тела), <часть>_Textures, <часть>_BodyMask.json (вершины тела под частью, координаты Blender).
+// Части готовят Tools/Blender/fit_gear.py (подгонка), cut_gear.py (вырезание из тела) или place_gear.py
+// (жёсткая часть без смены формы): <часть>.fbx (меш на скелете тела), <часть>_Textures, <часть>_BodyMask.json (вершины тела под частью, координаты Blender).
 //  1. материал URP Lit из текстур части; металл с гладкостью fit_gear.py уже свёл в одну картинку;
 //  2. импорт FBX части с масштабом модели тела: тогда позы покоя костей части (bindposes) совпадают с телом,
 //     и кости привязываются по именам без пересчёта. Совпадение проверяется;
@@ -25,8 +25,9 @@ public static class SetupGear
     const string VariantPath = "Assets/Characters/Survivor/PlayerSurvivor8b8745d5.prefab";
     const string BodyName = "Survivor_Body";
     const int MaxTextureSize = 2048;
-    // ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py: файлы у обоих одинаковые
-    static readonly string[] Parts = { "ClothChest", "ClothGloves" };
+    // ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots ставит без смены
+    // формы place_gear.py: файлы у всех одинаковые
+    static readonly string[] Parts = { "ClothChest", "ClothGloves", "ClothBoots" };
 
     // Заполняет JsonUtility
 #pragma warning disable CS0649
