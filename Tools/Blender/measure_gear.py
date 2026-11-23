@@ -4,13 +4,16 @@
 
 Запуск (из корня проекта):
     "E:\\Software\\Blender\\blender.exe" --background --factory-startup --python Tools/Blender/measure_gear.py -- ^
-        --gear Assets/Models/Gear/ClothChest.fbx [--gear ...] [--png "<папка для снимков>"]
+        --gear Assets/Models/Gear/ClothChest.fbx [--gear ...] [--png "<папка для снимков>"] [--faces] [--poses idle,aim]
 
 Для каждой позы из gear_poses.py (заданные вручную и записанные в игре) печатает:
   * skin - вершины части глубже 1 мм внутри торса (ближайшая точка кожи в пределах 3 см, вершина за ней
     по нормали), не считая спрятанной кожи: это проступание кожи сквозь часть;
   * limbs - то же для рук и ног: рука или бедро зашли в часть;
   * exposed - спрятанные вершины тела, от которых луч наружу по нормали не упирается в часть: там видна дыра.
+  * faces (с --faces) - грани части, сквозь которые проходит видимая кожа: точка внутри грани глубже 1 мм в теле.
+    Вершины при этом могут быть снаружи: плоская грань между ними провисает к телу (щели на нижней ленте обмоток
+    NomadPants). Медленно, поэтому по ключу; --poses idle,walk - только позы, в имени которых есть эти слова.
 С --png рисует тело без спрятанной зоны и части спереди, сбоку и сзади в каждой позе.
 """
 import argparse
@@ -31,12 +34,16 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from gear_poses import RECORDED, RECORDED_MESH, all_poses, limit_bones, recorded_error, set_pose  # noqa: E402
 
 INSIDE = 0.001
+FACE_SAMPLES = ((1 / 3, 1 / 3, 1 / 3), (0.5, 0.5, 0), (0, 0.5, 0.5), (0.5, 0, 0.5),
+                (2 / 3, 1 / 6, 1 / 6), (1 / 6, 2 / 3, 1 / 6), (1 / 6, 1 / 6, 2 / 3))  # точки внутри грани для --faces
 TORSO = {'Hips', 'Spine', 'Chest', 'Neck', 'Head', 'LeftShoulder', 'RightShoulder'}
 
 argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
 parser = argparse.ArgumentParser()
 parser.add_argument('--gear', action='append', required=True)
 parser.add_argument('--png', default='')
+parser.add_argument('--faces', action='store_true')
+parser.add_argument('--poses', default='')
 args = parser.parse_args(argv)
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -121,6 +128,23 @@ def measure(pose):
                 limb_depth = max(limb_depth, depth)
             n, d = where.get(bone, (0, 0.0))
             where[bone] = (n + 1, max(d, depth))
+    faces, face_depth = 0, 0.0
+    if args.faces:
+        for bm in gear_bms:
+            for tri in bm.calc_loop_triangles():
+                pts = [l.vert.co for l in tri]
+                deepest = 0.0
+                for a, b, c in FACE_SAMPLES:
+                    x = pts[0] * a + pts[1] * b + pts[2] * c
+                    loc, normal, fi, _ = body_bvh.find_nearest(x, 0.03)
+                    if loc is None:
+                        continue
+                    depth = -(x - loc).dot(normal)
+                    if depth > INSIDE and not all(bv.index in hidden for bv in body_bm.faces[fi].verts):
+                        deepest = max(deepest, depth)
+                if deepest > 0:
+                    faces += 1
+                    face_depth = max(face_depth, deepest)
     gear_bm = bmesh.new()
     for bm in gear_bms:
         tmp = bpy.data.meshes.new('tmp')
@@ -144,15 +168,17 @@ def measure(pose):
             diff = max(kd.find(p)[2] for p in RECORDED_MESH[pose][key])
             if diff > worst['game_diff'].get(key, (0.0, ''))[0]:
                 worst['game_diff'][key] = (diff, pose)
-    for key, value in (('skin', skin), ('limbs', limbs), ('exposed', exposed)):
+    for key, value in (('skin', skin), ('limbs', limbs), ('exposed', exposed), ('faces', faces)):
         worst[key] = max(worst[key], value)
     worst['skin_depth'] = max(worst['skin_depth'], skin_depth)
     worst['limb_depth'] = max(worst['limb_depth'], limb_depth)
+    worst['face_depth'] = max(worst['face_depth'], face_depth)
     # позы из игры с одной рукой в части повторяются десятками: печатаются только с кожей или дырой
-    if pose.startswith('play:') and not skin and not exposed:
+    if pose.startswith('play:') and not skin and not exposed and not faces:
         return
     print(f'[Measure] {pose:16s} skin {skin:3d} ({skin_depth * 1000:4.1f} mm) limbs {limbs:3d} ({limb_depth * 1000:4.1f} mm) '
-          f'exposed {exposed}/{len(hidden)} of {total}: ' +
+          f'exposed {exposed}/{len(hidden)} of {total}' +
+          (f' faces {faces} ({face_depth * 1000:.1f} mm)' if args.faces else '') + ': ' +
           ', '.join(f'{b} {n}' for b, (n, d) in sorted(where.items(), key=lambda x: -x[1][0])[:4]))
 
 
@@ -199,14 +225,17 @@ def render(cam, pose):
 
 
 # Маска удаляет грани тела, поэтому сначала замер во всех позах, потом снимки
-worst = {'skin': 0, 'limbs': 0, 'exposed': 0, 'skin_depth': 0.0, 'limb_depth': 0.0, 'game_diff': {}}
+worst = {'skin': 0, 'limbs': 0, 'exposed': 0, 'faces': 0, 'skin_depth': 0.0, 'limb_depth': 0.0, 'face_depth': 0.0,
+         'game_diff': {}}
 print(f'[Measure] poses from game: {len(RECORDED)}, worst axis error '
       f'{max((recorded_error(arm_obj, p) for p in RECORDED), default=0.0) * 1000:.2f} mm')
-for pose in all_poses():
+poses = [p for p in all_poses() if not args.poses or any(k in p for k in args.poses.split(','))]
+for pose in poses:
     set_pose(arm_obj, pose)
     measure(pose)
 print(f'[Measure] all poses: worst skin {worst["skin"]} ({worst["skin_depth"] * 1000:.1f} mm), '
-      f'limbs {worst["limbs"]} ({worst["limb_depth"] * 1000:.1f} mm), exposed {worst["exposed"]}/{len(hidden)}; '
+      f'limbs {worst["limbs"]} ({worst["limb_depth"] * 1000:.1f} mm), exposed {worst["exposed"]}/{len(hidden)}' +
+      (f', faces {worst["faces"]} ({worst["face_depth"] * 1000:.1f} mm)' if args.faces else '') + '; '
       f'{len(RECORDED_MESH)} game poses, meshes differ from game: ' +
       ', '.join(f'{k} {d * 1000:.2f} mm ({p})' for k, (d, p) in worst['game_diff'].items()))
 if args.png:

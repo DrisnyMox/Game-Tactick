@@ -212,6 +212,8 @@ public sealed class RaidHud
         string text = (result.extracted ? "Вынесено: " : "Потеряно: ") + result.items.Describe();
         if (!result.kept.IsEmpty)
             text += "\nЗащищённый карман сохранил: " + result.kept.Describe();
+        if (result.lostGear.Length > 0)
+            text += "\nСнаряжение потеряно: " + string.Join(", ", result.lostGear);
         if (result.unlocked.Length > 0)
             text += "\n\nОткрыты рецепты: " + string.Join(", ", result.unlocked);
         LoopGui.Shadowed(new Rect(rect.x + font, rect.y + font * 4, w - font * 2, h - font * 7), text, body, Color.white);

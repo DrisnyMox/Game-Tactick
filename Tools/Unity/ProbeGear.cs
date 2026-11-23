@@ -97,8 +97,13 @@ public static class ProbeGear
             var worn = new SerializedObject(shooter.GetComponent<WornGear>());
             body = (SkinnedMeshRenderer)worn.FindProperty("body").objectReferenceValue;
             var pieces = worn.FindProperty("pieces");
+            // На варианте стоят все части, замеряются надетые (включённые)
             for (int i = 0; i < pieces.arraySize; i++)
-                parts.Add((SkinnedMeshRenderer)pieces.GetArrayElementAtIndex(i).FindPropertyRelative("renderer").objectReferenceValue);
+            {
+                var part = (SkinnedMeshRenderer)pieces.GetArrayElementAtIndex(i).FindPropertyRelative("renderer").objectReferenceValue;
+                if (part.gameObject.activeSelf)
+                    parts.Add(part);
+            }
             scale = ((ModelImporter)AssetImporter.GetAtPath(BodyModelPath)).globalScale;
             // T-поза - кости ассета варианта: в Play связь экземпляра с префабом не видна
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(VariantPath);

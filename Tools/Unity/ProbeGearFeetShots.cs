@@ -79,8 +79,8 @@ public static class ProbeGearFeetShots
             root = shooter.transform;
             input = shooter.GetComponent<StarterAssetsInputs>();
             controller = shooter.GetComponent<ThirdPersonController>();
-            // надетые ботинки - ClothBoots или NomadBoots (SetupGear.cs ставит одни)
-            boots = root.Cast<Transform>().Single(t => t.name.EndsWith("Boots")).GetComponent<SkinnedMeshRenderer>();
+            // надетые ботинки - ClothBoots или NomadBoots: на варианте стоят обе, включены одни
+            boots = root.Cast<Transform>().Single(t => t.name.EndsWith("Boots") && t.gameObject.activeSelf).GetComponent<SkinnedMeshRenderer>();
             bones = root.GetComponentsInChildren<Transform>(true).GroupBy(t => t.name).ToDictionary(g => g.Key, g => g.First());
             start = root.position;
             float yaw = Enumerable.Range(0, 24).Select(k => k * 15f).First(a => IsClear(Quaternion.Euler(0f, a, 0f) * root.forward));

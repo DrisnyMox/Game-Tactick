@@ -22,6 +22,8 @@ public class BaseHub : MonoBehaviour
     BaseStation open;
     bool showResult;
     Vector2 scroll;
+    // Последняя часть, сделанная на верстаке, пока окно открыто: цвет качества выпадает случайно, его надо показать
+    GearPiece crafted;
     float resetArmedUntil = -1f;
     GUIStyle title, text, button, small;
 
@@ -67,10 +69,12 @@ public class BaseHub : MonoBehaviour
                 Close();
             return;
         }
-        if (near != null && keyboard.eKey.wasPressedThisFrame && !SettingsMenu.IsOpen)
+        // Открыто окно снаряжения (EquipmentScreen): места базы не открываются
+        if (near != null && keyboard.eKey.wasPressedThisFrame && !SettingsMenu.IsOpen && !LoopGui.ModalOpen)
         {
             open = near;
             scroll = Vector2.zero;
+            crafted = null;
             LoopGui.SetModal(true, player);
         }
     }
@@ -94,7 +98,8 @@ public class BaseHub : MonoBehaviour
 
     void OnGUI()
     {
-        if (SettingsMenu.IsOpen)
+        // OnGUI рисуется поверх любого Canvas: под меню настроек и окном снаряжения надписи базы не нужны
+        if (SettingsMenu.IsOpen || LoopGui.ModalOpen && open == null && !showResult)
             return;
         int font = LoopGui.FontSize;
         MakeStyles(font);
@@ -114,6 +119,8 @@ public class BaseHub : MonoBehaviour
             if (near != null)
                 LoopGui.Shadowed(new Rect(0, Screen.height * 0.62f, Screen.width, font * 2), $"[E]  {near.Title}",
                     LoopGui.Label(Mathf.RoundToInt(font * 1.2f), TextAnchor.MiddleCenter), Color.white);
+            LoopGui.Shadowed(new Rect(20, 20 + font * 3.1f, 600, font * 1.5f), "[I]  Снаряжение",
+                LoopGui.Label(font, TextAnchor.UpperLeft), new Color(0.6f, 0.92f, 0.9f));
             return;
         }
 
@@ -169,6 +176,8 @@ public class BaseHub : MonoBehaviour
             : $"Персонаж уничтожен. Потеряно: {result.items.Describe()}.";
         if (!result.extracted && !result.kept.IsEmpty)
             body += $"\nЗащищённый карман сохранил: {result.kept.Describe()}.";
+        if (result.lostGear.Length > 0)
+            body += $"\nСнаряжение потеряно: {string.Join(", ", result.lostGear)}. В пустые слоты надет базовый набор.";
         if (result.unlocked.Length > 0)
             body += $"\n\n<color=#66b3ff>Открыты рецепты: {string.Join(", ", result.unlocked)}</color>";
         GUILayout.Label(body, text);
@@ -315,6 +324,41 @@ public class BaseHub : MonoBehaviour
                     profile.stash[item] -= count;
                 profile.stash[recipe.result] += recipe.amount;
                 Profile.Save();
+            }
+            GUI.enabled = true;
+            GUILayout.EndHorizontal();
+            GUILayout.Space(6);
+        }
+
+        GUILayout.Space(6);
+        GUILayout.Label("<b>Снаряжение</b>  <color=#9aa3ab>— надевается в окне [I], цвет качества выпадает случайно</color>", text);
+        if (crafted != null)
+            GUILayout.Label($"Сделано: <b>{Gear.Name(crafted.kind)}</b>, <color=#{ColorUtility.ToHtmlStringRGB(Gear.QualityColor(crafted.quality))}>" +
+                            $"{Gear.QualityName(crafted.quality).ToLower()}</color>", text);
+        foreach (var recipe in GearRecipe.All)
+        {
+            bool enough = true;
+            var cost = new System.Text.StringBuilder();
+            foreach (var (item, count) in recipe.cost)
+            {
+                bool has = profile.stash[item] >= count;
+                enough &= has;
+                cost.Append(cost.Length > 0 ? ",  " : "")
+                    .Append(has ? "<color=#9be59b>" : "<color=#ff8a7a>")
+                    .Append(Items.Name(item)).Append(' ').Append(profile.stash[item]).Append('/').Append(count).Append("</color>");
+            }
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"<b>{Gear.Name(recipe.result)}</b>  <color=#9aa3ab>{Gear.SlotName(Gear.Slot(recipe.result)).ToLower()}</color>\n{cost}",
+                text, GUILayout.ExpandWidth(true));
+            GUI.enabled = enough;
+            if (GUILayout.Button("Сделать", small, GUILayout.Width(text.fontSize * 7)))
+            {
+                foreach (var (item, count) in recipe.cost)
+                    profile.stash[item] -= count;
+                var piece = new GearPiece { kind = recipe.result, quality = Gear.RollCraftQuality() };
+                profile.gear.Add(piece);
+                Profile.Save();
+                crafted = piece;
             }
             GUI.enabled = true;
             GUILayout.EndHorizontal();

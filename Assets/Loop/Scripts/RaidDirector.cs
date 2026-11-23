@@ -8,7 +8,8 @@ using UnityEngine.SceneManagement;
 /// Вылазка: сцена Raid. Каждая вылазка — новая карта (случайный сид арены).
 ///
 /// Начало: снаряжение из Profile.Carried ложится в рюкзак игрока (бронежилет — больше здоровья, большой магазин —
-/// больше патронов в магазине), перезарядка берёт патроны из рюкзака.
+/// больше патронов в магазине), перезарядка берёт патроны из рюкзака. Надетое снаряжение (Profile.TakeWornForRaid)
+/// видно на игроке; эвакуировался — возвращается на базу надетым, уничтожен — потеряно, кроме базового набора.
 /// После генерации карты: игрок встаёт на базу один, рейдеры — по карте не ближе minRaiderDistance от него.
 /// Остров (IslandLayout): база один — причал высадки, лучи эвакуации — на трёх дальних причалах, ящики — в руинах
 /// и остовах, за краем карты океан, глубже мелководья игрока не пускает. Арена RTS: лучи — база два и две
@@ -79,6 +80,8 @@ public class RaidDirector : MonoBehaviour
     readonly List<int2> spawnCells = new();
     ItemCounts playerDrop;
     ItemCounts playerKept;
+    // Надетое не из базового набора: в профиле его на время вылазки нет
+    List<GearPiece> raidGear;
     State state;
     float endTime;
     Vector3 lastDry;
@@ -116,6 +119,10 @@ public class RaidDirector : MonoBehaviour
         Noise.Made += Noise_Made;
         player.Died += Player_Died;
 
+        raidGear = Profile.TakeWornForRaid();
+        var dressed = new List<GearPiece>(Profile.Worn());
+        dressed.AddRange(raidGear);
+        Gear.Dress(player.GetComponent<WornGear>(), dressed);
         var carried = Profile.TakeCarriedForRaid();
         playerBackpack.Load(carried);
         if (carried[ItemId.Armor] > 0)
@@ -387,7 +394,7 @@ public class RaidDirector : MonoBehaviour
         state = State.Lost;
         endTime = Time.time;
         // Обработчик рюкзака подписан раньше (Awake) и уже выложил его содержимое в playerDrop и карман в playerKept
-        Profile.Lose(playerDrop ?? new ItemCounts(), playerKept ?? new ItemCounts());
+        Profile.Lose(playerDrop ?? new ItemCounts(), playerKept ?? new ItemCounts(), raidGear);
     }
 
     void Raider_Died(CharacterHealth raider) => respawnTimes[raider] = Time.time + raiderRespawnDelay;
@@ -420,7 +427,7 @@ public class RaidDirector : MonoBehaviour
             // Патроны из магазина тоже уходят с вылазки
             playerBackpack.Add(ItemId.Ammo, playerShooter.Ammo);
             playerShooter.SetLoaded(0);
-            Profile.Extract(playerBackpack.Contents);
+            Profile.Extract(playerBackpack.Contents, raidGear);
             playerBackpack.Load(new ItemCounts());
             LoopGui.SetModal(true, player.gameObject);
             return;

@@ -5,7 +5,8 @@ using UnityEngine;
 /// <summary>
 /// Надетое снаряжение на модели игрока: каждая часть (нагрудник, штаны, ботинки, перчатки) - свой
 /// SkinnedMeshRenderer на скелете тела. Зону тела под надетой частью компонент прячет: без неё кожа
-/// проступает сквозь часть на сгибах. Части и их зоны ставит Tools/Unity/SetupGear.cs.
+/// проступает сквозь часть на сгибах. На варианте стоят все части, надеты включённые; что надеть, решает
+/// профиль (Gear.Dress на базе и в вылазке). Части и их зоны ставит Tools/Unity/SetupGear.cs.
 /// </summary>
 public class WornGear : MonoBehaviour
 {
@@ -20,14 +21,18 @@ public class WornGear : MonoBehaviour
     [SerializeField] SkinnedMeshRenderer body;
     [SerializeField] Piece[] pieces;
 
+    static readonly int QualityColorId = Shader.PropertyToID("_QualityColor");
+
     Mesh sourceMesh;
     Mesh maskedMesh;
+    MaterialPropertyBlock block;
     readonly List<int> triangles = new();
     readonly HashSet<int> hidden = new();
 
     void Awake()
     {
         sourceMesh = body.sharedMesh;
+        block = new MaterialPropertyBlock();
     }
 
     void OnEnable()
@@ -39,6 +44,26 @@ public class WornGear : MonoBehaviour
     {
         if (maskedMesh != null)
             Destroy(maskedMesh);
+    }
+
+    /// <summary>
+    /// Надеть части с этими именами объектов, остальные снять. Цвет — цвет качества части: им шейдер части
+    /// (Game Tactick/Gear) красит светлую полосу по маске качества
+    /// </summary>
+    public void Show(IReadOnlyDictionary<string, Color> colors)
+    {
+        foreach (var piece in pieces)
+        {
+            bool wear = colors.TryGetValue(piece.renderer.gameObject.name, out var color);
+            piece.renderer.gameObject.SetActive(wear);
+            if (!wear)
+                continue;
+            // Свой блок на часть: материал общий для всех, у кого эта часть, а цвет у каждой надетой свой
+            piece.renderer.GetPropertyBlock(block);
+            block.SetColor(QualityColorId, color);
+            piece.renderer.SetPropertyBlock(block);
+        }
+        Refresh();
     }
 
     /// <summary>Прячет тело под надетыми (включёнными) частями. Звать после того, как часть надета или снята.</summary>

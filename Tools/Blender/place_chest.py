@@ -522,20 +522,16 @@ def masks(path):
         pts = np.array(json.load(f)['hidden']).reshape(-1, 3)
     return {int(np.argmin(((body_rest - p) ** 2).sum(1))) for p in pts}
 
-occluders = [world_bm(o) for o in [pants] + others]
-occluders = [BVHTree.FromBMesh(b) for b in occluders]
-
-
 def seen_from_outside(i):
-    """Видна ли кожа снаружи: хоть один луч от неё уходит, не встретив ни туники, ни тела, ни других частей. Штаны
-    закрывают обзор снизу: без них из кожи талии и под грудью луч уходил вниз в щель между подолом и штанами.
-    Лучи круче 30° вниз не считаются: камера игры не смотрит снизу вверх под подол."""
+    """Видна ли кожа снаружи: хоть один луч от неё уходит, не встретив ни туники, ни тела. Другие части не закрывают
+    обзор: туника надевается и без штанов, и кожа таза под подолом без штанов видна (спрятанная, она была дырой
+    между туникой и тазом). Лучи круче 30° вниз не считаются: камера игры не смотрит снизу вверх под подол."""
     p = Vector(body_rest[i]) + Vector(body_normal[i]) * 0.0005
     n = Vector(body_normal[i])
     for dv in dirs:
         if dv.dot(n) <= 0.05 or dv.z < -0.5:
             continue
-        if all(t.ray_cast(p, dv, 1.0)[0] is None for t in [fit_bvh, body_bvh] + occluders):
+        if all(t.ray_cast(p, dv, 1.0)[0] is None for t in (fit_bvh, body_bvh)):
             return True
     return False
 
@@ -550,26 +546,20 @@ for i in set(covered) - under:
 print("[Chest] kept (seen through openings): " + ", ".join(f"{b} {z:.2f}:{n}" for (b, z), n in sorted(kept.items())))
 pants_hidden = masks(PANTS_PATH)
 other_hidden = [masks(p) for p in OTHER_PARTS]
-# треугольники на краю подола: часть вершин под туникой, остальные под штанами - прячет туника
 body.data.calc_loop_triangles()
-edge_extra = set()
-for lt in body.data.loop_triangles:
-    vs = set(lt.vertices)
-    if vs & under and vs <= (under | pants_hidden):
-        edge_extra |= vs - under
 # одиночная вершина среди спрятанных (в ложбинке на пояснице луч по нормали проходит мимо туники) оставляла
 # 6 треугольников кожи под туникой
 nbrs = {}
 for a, b in body_edges:
     nbrs.setdefault(a, set()).add(b)
     nbrs.setdefault(b, set()).add(a)
-filled = {i for i in range(len(body_rest)) if i not in under | pants_hidden and main_bone[i] in {'Hips', 'Spine', 'Chest'} and
-          nbrs[i] <= (under | edge_extra | pants_hidden)}
+filled = {i for i in range(len(body_rest)) if i not in under and main_bone[i] in {'Hips', 'Spine', 'Chest'} and
+          nbrs[i] <= under}
 under |= filled
-hidden = sorted(under | edge_extra)
+hidden = sorted(under)
 hid = set(hidden)
 print(f'[Chest] torso skin covered by the top: {len(covered)}, seen through openings (kept): {len(covered) - len(under)}, '
-      f'hidden {len(hidden)} (of them on the pants edge {len(edge_extra)})')
+      f'hidden {len(hidden)}')
 # голая кожа торса между туникой и штанами: треугольники торса ниже горловины, которые не прячет ни одна часть
 bare = [lt for lt in body.data.loop_triangles
         if all(main_bone[i] in {'Hips', 'Spine'} for i in lt.vertices) and
@@ -651,19 +641,30 @@ if args.png:
     render('src', Vector((0, 0, 0.74)), 0.55, ALL)
     show(top)
     render('fit', Vector((0, 0, 0.74)), 0.55, ALL)
-    # тело без спрятанной кожи всех частей, как в игре
-    bm2 = bmesh.new()
-    bm2.from_mesh(body.data)
-    bm2.verts.ensure_lookup_table()
-    sets = [hid, pants_hidden] + other_hidden
-    bmesh.ops.delete(bm2, geom=[f for f in bm2.faces if any(all(v.index in s for v in f.verts) for s in sets)],
-                     context='FACES_ONLY')
-    bm2.to_mesh(body.data)
-    bm2.free()
+    # тело без спрятанной кожи всех частей, как в игре; второе - туника без штанов (на базе штаны можно снять)
+    body_np = body.copy()
+    body_np.data = body.data.copy()
+    scene.collection.objects.link(body_np)
     skin_mat = bpy.data.materials.new('Skin')
     skin_mat.diffuse_color = (0.85, 0.62, 0.52, 1)
-    body.data.materials.clear()
-    body.data.materials.append(skin_mat)
+    for o, sets in ((body, [hid, pants_hidden] + other_hidden), (body_np, [hid] + other_hidden)):
+        bm2 = bmesh.new()
+        bm2.from_mesh(o.data)
+        bm2.verts.ensure_lookup_table()
+        bmesh.ops.delete(bm2, geom=[f for f in bm2.faces if any(all(v.index in s for v in f.verts) for s in sets)],
+                         context='FACES_ONLY')
+        bm2.to_mesh(o.data)
+        bm2.free()
+        o.data.materials.clear()
+        o.data.materials.append(skin_mat)
+    show(body_np, top, *others)
+    render('nopants', Vector((0, 0, 0.66)), 0.45, ('front', 'back', 'left', 'right', 'below', 'below_back', 'game', 'persp'))
+    for pose in [p for p in RECORDED if p.split(':')[1].split('@')[0] in ('idle', 'walk', 'run', 'aim')][::6]:
+        set_pose(arm_obj, pose)
+        hips = arm_obj.pose.bones['Hips'].head
+        render('nopants_' + pose.replace(':', '_').replace('@', '_'), Vector((hips.x, hips.y, 0.68)), 0.5,
+               ('front', 'left', 'game'))
+    set_pose(arm_obj, 'tpose')
     show(body, top, pants, *others)
     render('body', Vector((0, 0, 0.74)), 0.55, ALL + ('below', 'below_back', 'game'))
     render('shoulder', Vector((0.11, 0.02, 0.85)), 0.2, ('front', 'back', 'left', 'top', 'persp'))

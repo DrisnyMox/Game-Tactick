@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using UnityEditor;
@@ -7,7 +8,9 @@ using UnityEngine;
 // Надевает части снаряжения из Assets/Models/Gear на игрока (вариант PlayerSurvivor8b8745d5).
 // Части готовят Tools/Blender/fit_gear.py (подгонка), cut_gear.py (вырезание из тела), place_gear.py (жёсткая часть
 // без смены формы), place_pants.py или place_chest.py (меш, вырезанный из модели генератора): <часть>.fbx (меш на скелете тела), <часть>_Textures, <часть>_BodyMask.json (вершины тела под частью, координаты Blender).
-//  1. материал URP Lit из текстур части; металл с гладкостью fit_gear.py уже свёл в одну картинку;
+//  1. материал из текстур части на шейдере Game Tactick/Gear (URP Lit с покраской в цвет качества); металл
+//     с гладкостью fit_gear.py уже свёл в одну картинку. Маска цвета качества <часть>_quality.png
+//     (Tools/Blender/quality_mask.py) — если есть, и средняя яркость текстуры под ней;
 //  2. импорт FBX части с масштабом модели тела: тогда позы покоя костей части (bindposes) совпадают с телом,
 //     и кости привязываются по именам без пересчёта. Совпадение проверяется;
 //  3. в варианте каждая часть - дочерний объект со своим SkinnedMeshRenderer, кости - скелет варианта;
@@ -25,14 +28,20 @@ public static class SetupGear
     const string VariantPath = "Assets/Characters/Survivor/PlayerSurvivor8b8745d5.prefab";
     const string BodyName = "Survivor_Body";
     const int MaxTextureSize = 2048;
-    // Надетые части. ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots
-    // и NomadBoots ставит без смены формы place_gear.py, ClothPantsRope - place_pants.py, NomadChest - place_chest.py:
-    // файлы у всех одинаковые. Части из Folder, которых здесь нет (например ClothBoots и ClothChest, пока надеты
-    // NomadBoots и NomadChest), с варианта снимаются
-    static readonly string[] Parts = { "NomadChest", "ClothGloves", "NomadBoots", "ClothPantsRope" };
+    // Маска плавная, на экране полоса узкая: полный размер не нужен
+    const int MaskTextureSize = 1024;
+    const string ShaderName = "Game Tactick/Gear";
+    // На вариант ставятся все части из Folder: что надеть, в игре решает профиль (Gear.Dress, окно снаряжения
+    // EquipmentScreen). ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots
+    // и NomadBoots ставит без смены формы place_gear.py, ClothPantsRope и NomadPants - place_pants.py, NomadChest -
+    // place_chest.py, NomadGloves - place_gloves.py: файлы у всех одинаковые. Parts - части, включённые в префабе:
+    // так игрок одет в сценах без профиля (SampleScene, SurvivorPlayground) и в пробах снаряжения; остальные стоят
+    // выключенными
+    static readonly string[] Parts = { "NomadChest", "NomadGloves", "NomadBoots", "NomadPants" };
     // Части из одного слоя ткани с открытыми краями: у NomadChest между поясом-обмоткой и подолом, у горловины
-    // и под накидкой видна изнанка. С одной стороной граней в эти щели был виден фон (тело под частью спрятано)
-    static readonly string[] DoubleSided = { "NomadChest" };
+    // и под накидкой видна изнанка, у NomadPants - внутри широкой штанины шорт и с изнанки лент обмоток, у NomadGloves -
+    // в отверстиях для пальцев и в манжете. С одной стороной граней в эти щели был виден фон (тело под частью спрятано)
+    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves" };
 
     // Заполняет JsonUtility
 #pragma warning disable CS0649
@@ -66,21 +75,15 @@ public static class SetupGear
         var own = root.GetComponentsInChildren<Transform>(true).GroupBy(t => t.name).ToDictionary(g => g.Key, g => g.First());
         var pieces = new List<(SkinnedMeshRenderer renderer, int[] hidden)>();
 
-        // Снятые части: в папке есть, в Parts нет
-        foreach (var path in AssetDatabase.FindAssets("t:Model", new[] { Folder.TrimEnd('/') }).Select(AssetDatabase.GUIDToAssetPath))
-        {
-            var name = System.IO.Path.GetFileNameWithoutExtension(path);
-            var child = root.transform.Find(name);
-            if (!Parts.Contains(name) && child != null)
-            {
-                Object.DestroyImmediate(child.gameObject);
-                log.AppendLine($"{name}: снята");
-            }
-        }
+        var all = AssetDatabase.FindAssets("t:Model", new[] { Folder.TrimEnd('/') })
+            .Select(g => System.IO.Path.GetFileNameWithoutExtension(AssetDatabase.GUIDToAssetPath(g))).OrderBy(n => n).ToArray();
+        foreach (var name in Parts)
+            if (!all.Contains(name))
+                throw new System.InvalidOperationException($"{name}: нет {Folder}{name}.fbx");
 
-        foreach (var part in Parts)
+        foreach (var part in all)
         {
-            var material = BuildMaterial(part);
+            var material = BuildMaterial(part, log);
             var modelPath = Folder + part + ".fbx";
             var importer = (ModelImporter)AssetImporter.GetAtPath(modelPath);
             importer.globalScale = bodyImporter.globalScale;
@@ -114,9 +117,12 @@ public static class SetupGear
             // Границы тела: часть всегда внутри них, отдельный пересчёт не нужен
             smr.localBounds = body.localBounds;
 
+            piece.gameObject.SetActive(Parts.Contains(part));
+
             var hidden = HiddenTriangles(part, body.sharedMesh, bodyImporter.globalScale, log);
             pieces.Add((smr, hidden));
-            log.AppendLine($"{part}: verts {source.sharedMesh.vertexCount}, hidden body triangles {hidden.Length}");
+            log.AppendLine($"{part}: verts {source.sharedMesh.vertexCount}, hidden body triangles {hidden.Length}" +
+                           (Parts.Contains(part) ? ", надета" : ""));
         }
 
         var worn = root.GetComponent<WornGear>();
@@ -202,20 +208,35 @@ public static class SetupGear
         return result.ToArray();
     }
 
-    static Material BuildMaterial(string part)
+    static Material BuildMaterial(string part, StringBuilder log)
     {
         string Tex(string suffix) => $"{Folder}{part}_Textures/{part}{suffix}.png";
-        SetImport(Tex(""), t => { });
-        SetImport(Tex("_normal"), t => t.textureType = TextureImporterType.NormalMap);
-        SetImport(Tex("_metallic_smoothness"), t => t.sRGBTexture = false);
+        SetImport(Tex(""), MaxTextureSize, t => { });
+        SetImport(Tex("_normal"), MaxTextureSize, t => t.textureType = TextureImporterType.NormalMap);
+        SetImport(Tex("_metallic_smoothness"), MaxTextureSize, t => t.sRGBTexture = false);
+        // Маска цвета качества (Tools/Blender/quality_mask.py) есть не у всех: базовый набор серый, его не красят
+        bool hasMask = File.Exists(Tex("_quality"));
+        if (hasMask)
+            SetImport(Tex("_quality"), MaskTextureSize, t =>
+            {
+                t.sRGBTexture = false;
+                t.textureCompression = TextureImporterCompression.CompressedHQ;
+            });
 
         var path = Folder + part + ".mat";
         var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
         if (mat == null)
         {
-            mat = new Material(Shader.Find("Universal Render Pipeline/Lit"));
+            mat = new Material(Shader.Find(ShaderName));
             AssetDatabase.CreateAsset(mat, path);
         }
+        mat.shader = Shader.Find(ShaderName);
+        mat.SetTexture("_QualityMask", hasMask ? AssetDatabase.LoadAssetAtPath<Texture2D>(Tex("_quality")) : null);
+        mat.SetColor("_QualityColor", Color.white);
+        float luma = hasMask ? MaskedLuma(Tex(""), Tex("_quality")) : 0.5f;
+        mat.SetFloat("_QualityLuma", luma);
+        if (hasMask)
+            log.AppendLine($"{part}: маска цвета качества, средняя яркость полосы {luma:F3}");
         mat.SetTexture("_BaseMap", AssetDatabase.LoadAssetAtPath<Texture2D>(Tex("")));
         mat.SetColor("_BaseColor", Color.white);
         mat.SetTexture("_BumpMap", AssetDatabase.LoadAssetAtPath<Texture2D>(Tex("_normal")));
@@ -230,12 +251,41 @@ public static class SetupGear
         return mat;
     }
 
-    static void SetImport(string path, System.Action<TextureImporter> change)
+    static void SetImport(string path, int maxSize, System.Action<TextureImporter> change)
     {
         AssetDatabase.ImportAsset(path);
         var t = (TextureImporter)AssetImporter.GetAtPath(path);
-        t.maxTextureSize = MaxTextureSize;
+        t.maxTextureSize = maxSize;
         change(t);
         t.SaveAndReimport();
+    }
+
+    // Средняя линейная яркость текстуры под маской: шейдер делит на неё яркость пикселя, и середина полосы
+    // становится ровно цветом качества. Файлы читаются с диска: импортированные текстуры сжаты и не читаются
+    static float MaskedLuma(string colorPath, string maskPath)
+    {
+        var color = new Texture2D(2, 2);
+        var mask = new Texture2D(2, 2);
+        color.LoadImage(File.ReadAllBytes(colorPath));
+        mask.LoadImage(File.ReadAllBytes(maskPath));
+        if (color.width != mask.width || color.height != mask.height)
+            throw new System.InvalidOperationException($"{maskPath}: {mask.width}x{mask.height}, а у текстуры {color.width}x{color.height}");
+        var c = color.GetPixels32();
+        var m = mask.GetPixels32();
+        double sum = 0, weight = 0;
+        for (int i = 0; i < c.Length; i++)
+        {
+            float w = m[i].r / 255f;
+            if (w < 0.5f)
+                continue;
+            var linear = ((Color)c[i]).linear;
+            sum += w * (0.2126 * linear.r + 0.7152 * linear.g + 0.0722 * linear.b);
+            weight += w;
+        }
+        Object.DestroyImmediate(color);
+        Object.DestroyImmediate(mask);
+        if (weight == 0)
+            throw new System.InvalidOperationException($"{maskPath}: маска пустая");
+        return (float)(sum / weight);
     }
 }

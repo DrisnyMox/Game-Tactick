@@ -543,8 +543,9 @@ public class SurvivorShooter : MonoBehaviour
 
     void OnGUI()
     {
-        // OnGUI рисуется поверх любого Canvas: под экраном загрузки и меню настроек надписи не нужны
-        if (ArenaLoadingScreen.IsShown || SettingsMenu.IsOpen)
+        // OnGUI рисуется поверх любого Canvas: под экраном загрузки, меню настроек и окнами базы и вылазки
+        // (окно снаряжения, итог вылазки) надписи не нужны
+        if (ArenaLoadingScreen.IsShown || SettingsMenu.IsOpen || LoopGui.ModalOpen)
             return;
         if (botControlled)
             return;
