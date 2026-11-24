@@ -25,7 +25,7 @@ public class GearCardView : MonoBehaviour
         Quality = quality;
         icon.sprite = pieceIcon;
         nameLabel.text = Gear.Name(kind);
-        setLabel.text = $"{Gear.QualityName(quality)}  ·  {Gear.Set(kind)}";
+        setLabel.text = $"{Gear.QualityName(quality)}  ·  {Gear.SetName(Gear.Set(kind))}";
         setLabel.color = Color.Lerp(Gear.QualityColor(quality), new Color(0.55f, 0.6f, 0.63f), 0.45f);
         countLabel.text = count > 1 ? "×" + count : "";
         qualityBar.color = Gear.QualityColor(quality);

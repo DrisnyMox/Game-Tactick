@@ -33,15 +33,16 @@ public static class SetupGear
     const string ShaderName = "Game Tactick/Gear";
     // На вариант ставятся все части из Folder: что надеть, в игре решает профиль (Gear.Dress, окно снаряжения
     // EquipmentScreen). ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots
-    // и NomadBoots ставит без смены формы place_gear.py, ClothPantsRope и NomadPants - place_pants.py, NomadChest -
-    // place_chest.py, NomadGloves - place_gloves.py: файлы у всех одинаковые. Parts - части, включённые в префабе:
-    // так игрок одет в сценах без профиля (SampleScene, SurvivorPlayground) и в пробах снаряжения; остальные стоят
-    // выключенными
-    static readonly string[] Parts = { "NomadChest", "NomadGloves", "NomadBoots", "NomadPants" };
+    // и NomadBoots ставит без смены формы place_gear.py, ClothPantsRope, NomadPants и SunPants - place_pants.py,
+    // NomadChest - place_chest.py, NomadGloves - place_gloves.py: файлы у всех одинаковые. Parts - части, включённые
+    // в префабе: так игрок одет в сценах без профиля (SampleScene, SurvivorPlayground) и в пробах снаряжения; остальные
+    // стоят выключенными
+    static readonly string[] Parts = { "NomadChest", "NomadGloves", "NomadBoots", "SunPants" };
     // Части из одного слоя ткани с открытыми краями: у NomadChest между поясом-обмоткой и подолом, у горловины
     // и под накидкой видна изнанка, у NomadPants - внутри широкой штанины шорт и с изнанки лент обмоток, у NomadGloves -
-    // в отверстиях для пальцев и в манжете. С одной стороной граней в эти щели был виден фон (тело под частью спрятано)
-    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves" };
+    // в отверстиях для пальцев и в манжете, у SunPants - внутри пояса сверху. С одной стороной граней в эти щели был
+    // виден фон (тело под частью спрятано)
+    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves", "SunPants" };
 
     // Заполняет JsonUtility
 #pragma warning disable CS0649

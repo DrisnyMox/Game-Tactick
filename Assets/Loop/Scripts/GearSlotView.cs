@@ -29,7 +29,7 @@ public class GearSlotView : MonoBehaviour
             icon.sprite = pieceIcon;
             icon.color = Color.white;
             qualityBar.color = Gear.QualityColor(piece.quality);
-            riskMark.SetActive(!Gear.IsBasic(piece.kind));
+            riskMark.SetActive(!Gear.IsFree(piece));
         }
         else
         {

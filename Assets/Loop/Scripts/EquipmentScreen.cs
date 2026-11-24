@@ -248,10 +248,10 @@ public class EquipmentScreen : MonoBehaviour
             bool isWorn = IsWorn(kind, quality);
             detailIcon.sprite = Icon(kind, quality);
             detailName.text = Gear.Name(kind);
-            detailSet.text = $"{Gear.QualityName(quality)}  ·  {Gear.Set(kind)}";
+            detailSet.text = $"{Gear.QualityName(quality)}  ·  {Gear.SetName(Gear.Set(kind))}";
             detailSet.color = Gear.QualityColor(quality);
             detailAbout.text = Gear.About(kind);
-            bool basic = Gear.IsBasic(kind);
+            bool basic = Gear.IsFree(kind, quality);
             detailRisk.text = basic ? "Не теряется при уничтожении" : "Теряется при уничтожении на вылазке";
             detailRisk.color = basic ? SafeColor : RiskColor;
             wearButton.interactable = !isWorn;
@@ -261,11 +261,11 @@ public class EquipmentScreen : MonoBehaviour
 
         var atRisk = new List<string>();
         foreach (var piece in Profile.Worn())
-            if (!Gear.IsBasic(piece.kind))
+            if (!Gear.IsFree(piece))
                 // Без цвета: с ним строка трёх частей не помещается над подсказкой, цвет и так на слотах
                 atRisk.Add(Gear.Name(piece.kind));
         riskSummary.text = atRisk.Count == 0
-            ? "Надет только базовый набор: при уничтожении он остаётся с тобой."
+            ? "Надет только серый базовый набор: при уничтожении он остаётся с тобой."
             : "При уничтожении на вылазке потеряешь: " + string.Join(", ", atRisk) + ".";
         riskSummary.color = atRisk.Count == 0 ? SafeColor : RiskColor;
     }

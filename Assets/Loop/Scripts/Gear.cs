@@ -3,52 +3,62 @@ using UnityEngine;
 
 /// <summary>
 /// Свойства частей снаряжения: имя на экране, слот, модель на игроке (дочерний объект с этим именем, его ставит
-/// Tools/Unity/SetupGear.cs), комплект, описание. Базовый набор есть у каждого, при уничтожении не теряется.
-/// Цвет качества (GearQuality) — у каждой части свой: базовый набор серый, скрафченное получает случайный цвет
-/// не ниже белого (RollCraftQuality). Цвет красит светлую полосу части на игроке (Dress).
+/// Tools/Unity/SetupGear.cs), комплект, описание. Серый базовый набор есть у каждого бесплатно и при уничтожении
+/// не теряется (IsFree). Цвет качества (GearQuality) — у каждой части свой, на верстаке он зависит от уровня
+/// комплекта (Crafting); скрафченное, в том числе базовый набор, теряется. Цвет красит светлую полосу части на игроке (Dress).
 /// </summary>
 public static class Gear
 {
     public const int SlotCount = 5;
     public const int QualityCount = 6;
+    public const int SetCount = 3;
 
     struct Info
     {
         public string name;
         public GearSlot slot;
         public bool basic;
-        public string set;
+        public GearSet set;
         public string about;
     }
 
     static readonly Info[] info =
     {
-        new() { name = "Тканевый нагрудник", slot = GearSlot.Chest, basic = true, set = "Базовый набор",
+        new() { name = "Тканевый нагрудник", slot = GearSlot.Chest, basic = true, set = GearSet.Basic,
             about = "Плотная ткань со шнуровкой по бокам и ремнями на плечах." },
-        new() { name = "Тканевые перчатки", slot = GearSlot.Hands, basic = true, set = "Базовый набор",
+        new() { name = "Тканевые перчатки", slot = GearSlot.Hands, basic = true, set = GearSet.Basic,
             about = "Обмотки на кисти и предплечья с серой манжетой. Пальцы открыты: спуск чувствуется." },
-        new() { name = "Штаны с верёвочным поясом", slot = GearSlot.Legs, basic = true, set = "Базовый набор",
+        new() { name = "Штаны с верёвочным поясом", slot = GearSlot.Legs, basic = true, set = GearSet.Basic,
             about = "Серые ремни на бёдрах и заплатка на колене." },
-        new() { name = "Тканевые ботинки", slot = GearSlot.Feet, basic = true, set = "Базовый набор",
+        new() { name = "Тканевые ботинки", slot = GearSlot.Feet, basic = true, set = GearSet.Basic,
             about = "Шнуровка и два серых ремня." },
-        new() { name = "Туника кочевника", slot = GearSlot.Chest, set = "Островные Кочевники",
+        new() { name = "Туника кочевника", slot = GearSlot.Chest, set = GearSet.Nomads,
             about = "Выгоревший лён без рукавов, бирюзовая накидка на плечах, шарф и пояс-обмотка с тремя сумками." },
-        new() { name = "Ботинки кочевника", slot = GearSlot.Feet, set = "Островные Кочевники",
+        new() { name = "Ботинки кочевника", slot = GearSlot.Feet, set = GearSet.Nomads,
             about = "Высокое холщовое голенище, плетёная верёвочная подошва и бирюзовая обмотка." },
-        new() { name = "Штаны кочевника", slot = GearSlot.Legs, set = "Островные Кочевники",
+        new() { name = "Штаны кочевника", slot = GearSlot.Legs, set = GearSet.Nomads,
             about = "Льняные шорты до колена с подвёрнутой манжетой, пояс-кушак и бирюзовые обмотки крест-накрест на голенях." },
-        new() { name = "Перчатки кочевника", slot = GearSlot.Hands, set = "Островные Кочевники",
+        new() { name = "Перчатки кочевника", slot = GearSlot.Hands, set = GearSet.Nomads,
             about = "Кожаные перчатки без пальцев, серые обмотки крест-накрест на запястье и светлая манжета на предплечье." },
+        new() { name = "Штаны Культа Солнца", slot = GearSlot.Legs, set = GearSet.SunCult,
+            about = "Индиго-чёрная ткань с тканым узором солнц, латунные наколенники и панель на бедре с медными проводами, серый пояс-повязка и обмотки." },
     };
 
     public static readonly GearKind[] All = (GearKind[])System.Enum.GetValues(typeof(GearKind));
 
     public static string Name(GearKind kind) => info[(int)kind].name;
     public static GearSlot Slot(GearKind kind) => info[(int)kind].slot;
-    /// <summary>Базовый набор: есть всегда, в вылазке не теряется</summary>
+    /// <summary>Часть базового набора: серая выдаётся бесплатно (IsFree), остальные цвета крафтятся</summary>
     public static bool IsBasic(GearKind kind) => info[(int)kind].basic;
-    public static string Set(GearKind kind) => info[(int)kind].set;
+    public static GearSet Set(GearKind kind) => info[(int)kind].set;
     public static string About(GearKind kind) => info[(int)kind].about;
+
+    public static string SetName(GearSet set) => set switch
+    {
+        GearSet.Basic => "Базовый набор",
+        GearSet.Nomads => "Островные Кочевники",
+        _ => "Культ Солнца",
+    };
     /// <summary>Имя дочернего объекта игрока с моделью части — оно же имя FBX в Assets/Models/Gear</summary>
     public static string Model(GearKind kind) => kind.ToString();
 
@@ -73,31 +83,10 @@ public static class Gear
         _ => new Color(1f, 0.58f, 0.16f),
     };
 
-    /// <summary>Какого цвета бывает часть: базовый набор — только серый, остальное — от белого и выше</summary>
-    public static bool HasQuality(GearKind kind, GearQuality quality) =>
-        IsBasic(kind) ? quality == GearQuality.Gray : quality != GearQuality.Gray;
+    /// <summary>Бесплатная серая часть базового набора: есть всегда, в вылазке не теряется (Profile.GiveBasicSet)</summary>
+    public static bool IsFree(GearKind kind, GearQuality quality) => IsBasic(kind) && quality == GearQuality.Gray;
 
-    // Шанс цвета при крафте, по порядку от белого. Опыт крафта и уровень ремесла его позже поднимут (README, шаг 5)
-    static readonly (GearQuality quality, float chance)[] craftChances =
-    {
-        (GearQuality.White, 0.60f),
-        (GearQuality.Green, 0.25f),
-        (GearQuality.Blue, 0.10f),
-        (GearQuality.Purple, 0.04f),
-        (GearQuality.Orange, 0.01f),
-    };
-
-    public static GearQuality RollCraftQuality()
-    {
-        float roll = Random.value;
-        foreach (var (quality, chance) in craftChances)
-        {
-            if (roll < chance)
-                return quality;
-            roll -= chance;
-        }
-        return GearQuality.White;
-    }
+    public static bool IsFree(GearPiece piece) => IsFree(piece.kind, piece.quality);
 
     /// <summary>Имя части с цветом качества — для итога вылазки и строки риска</summary>
     public static string FullName(GearPiece piece) => $"{Name(piece.kind)} ({QualityName(piece.quality).ToLower()})";

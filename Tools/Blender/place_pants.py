@@ -3,6 +3,9 @@
   * rope - тканевые штаны ClothPantsRope с верёвочным поясом (базовый набор), штанины заправлены в ClothBoots;
   * nomad - штаны комплекта Островных Кочевников NomadPants: шорты до колена с подвёрнутой светло-серой манжетой,
     серый пояс-кушак, бирюзовые обмотки крест-накрест на голенях с узлами сзади. Колено голое.
+  * sun - штаны комплекта Культа Солнца SunPants: во всю длину, индиго-чёрная ткань с узором солнц, серый пояс-повязка,
+    повязки и обмотки (помечены пользователем материалом под цвет качества), латунные наколенники и панель на бедре.
+    Вся ткань садится оболочкой, текстура чистится gear_texture.clean, маска цвета качества - по помеченным граням.
 
 Запуск (из корня проекта):
     "E:\\Software\\Blender\\blender.exe" --background --factory-startup --python Tools/Blender/place_pants.py -- ^
@@ -51,6 +54,7 @@ from mathutils.bvhtree import BVHTree
 
 sys.dont_write_bytecode = True  # без __pycache__ в Tools/Blender
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import gear_texture  # noqa: E402
 from gear_poses import RECORDED, SKIN_BONES, limit_bones, set_pose  # noqa: E402
 from gear_fit import (add_covered, covered_triangles, fill_skin_on_texture, follow, neighbours,  # noqa: E402
                       push_faces_off_skin, push_skin_bumps, seen_from_outside, shell_fit, smoothstep, sphere_dirs,
@@ -76,6 +80,33 @@ PARTS = {
                   z_range=(0.08, 0.57), widen_top=0.65, max_widen=1.5, first_hit=True,
                   cap=0.145, ankle_top=0.18, mask='unseen',
                   shell=dict(pieces=('part_003',), follow=('part_006',), split=0.016, loose=0.008)),
+    # Культ Солнца: штаны во всю длину, part_001 - ткань с поясом-повязкой, повязками на бёдрах, обмотками голеней
+    # и наколенниками одной сеткой, садится оболочкой целиком. Остальное идёт за тканью: панель на правом бедре
+    # (part_005), пряжка (part_010), шнур с бусинами, провода, скобы. part_024..041 - кубики по 3 мм у низа штанин
+    # (мусор выреза, под ботинком). Грани материала quality пользователь пометил под цвет качества (пояс, узел,
+    # повязки, обмотки). Текстура чистится gear_texture.clean (texture)
+    'sun': dict(chests=('NomadChest', 'ClothChest'), boots=('NomadBoots', 'ClothBoots'), main=('part_001',),
+                wraps=(), knots=(), z_range=(0.10, 0.58), widen_top=0.65, max_widen=1.5, first_hit=True,
+                cap=0.145, ankle_top=0.18, mask='unseen', drop=tuple(f'part_{k:03d}' for k in range(24, 42)),
+                shell=dict(pieces=('part_001',), follow=('part_002', 'part_005', 'part_006', 'part_007', 'part_008',
+                                                           'part_009', 'part_010', 'part_011', 'part_012', 'part_013',
+                                                           'part_014', 'part_015', 'part_016', 'part_017', 'part_018',
+                                                           'part_019', 'part_020', 'part_021', 'part_022', 'part_023'),
+                           split=0.016, loose=0.008),
+                face_gap=True, quality_material='01 - Default',
+                texture=dict(
+                    quality_material='01 - Default',
+                    # латунь и провода: тонкие линии, только цвет к картинке; panel - открытая коробка с окнами
+                    hard=('part_005', 'part_006', 'part_007', 'part_008', 'part_010', 'part_013', 'part_014'),
+                    panel=('part_005',), fabric_pieces=('part_001',),
+                    # цвета - медианы по картинкам генератора SunPants_front/back.webp (ткань, серое, латунь, ремень)
+                    palette=dict(fabric=(0.165, 0.178, 0.215), grey=(0.67, 0.645, 0.62), brass=(0.62, 0.49, 0.31),
+                                 leather=(0.31, 0.224, 0.14), copper=(0.72, 0.36, 0.16), sun=(0.33, 0.35, 0.42)),
+                    # сглаживание яркости (пикселей) и её пределы от медианы класса
+                    shade=dict(fabric=(2.5, 0.75, 1.2), grey=(0.8, 0.5, 1.35), brass=(0.8, 0.5, 1.4),
+                               leather=(1.0, 0.6, 1.3), copper=(0.5, 0.5, 1.4)),
+                    brass_share=0.25, window_area=0.003, behind_reach=0.03, sun_clear=0.022,
+                    sun_radius=0.012, sun_spacing=0.042, sun_alpha=0.7)),
 }
 GAP = 0.003            # ткань не ближе к коже, м (рост тела 1,088; в Unity умножается на 1,662)
 SHELL_FLOOR = 0.002    # nomad: шорты после возврата складок не ближе к коже
@@ -95,6 +126,7 @@ ANKLE_LOW_GAP = 0.006  # nomad: у щиколотки ниже ANKLE_LOW[0] - н
 ANKLE_LOW = (0.105, 0.13)
 TEXTURE_SIZE = 2048    # штаны на экране крупнее ботинок и перчаток
 WRAP_FACE_GAP = 0.001  # nomad: точки внутри граней лент обмоток над кожей не ближе
+SHELL_FACE_GAP = 0.001  # sun: и точки внутри граней ткани
 WRAP_BLEED = 6        # nomad: кожа на текстуре вокруг лент обмоток заливается на столько пикселей
 STEP = 0.01            # шаг срезов по высоте
 LEG_REACH = 0.085      # луч от центра ноги дальше этого уходит к другой ноге
@@ -190,6 +222,9 @@ for part in cfg['boots']:
 pieces = [o for o in import_new(src) if o.type == 'MESH']
 for o in [o for o in bpy.data.objects if o.type == 'EMPTY']:
     bpy.data.objects.remove(o)
+for o in [o for o in pieces if o.name in cfg.get('drop', ())]:
+    pieces.remove(o)
+    bpy.data.objects.remove(o)
 piece_names = sorted(o.name for o in pieces)
 for o in pieces:
     o.parent = None
@@ -237,6 +272,58 @@ shell_pieces = cfg['shell']['pieces'] if cfg['shell'] else ()
 is_shell = np.isin(piece_of, [piece_names.index(n) for n in shell_pieces])
 is_follow = np.isin(piece_of, [piece_names.index(n) for n in (cfg['shell']['follow'] if cfg['shell'] else ())])
 me.attributes.remove(me.attributes['piece'])
+src_co_pre = np.array([tuple(v.co) for v in me.vertices])
+# Грани под цвет качества пользователь пометил отдельным материалом (sun): запоминаются, затем у штанов один материал
+# с текстурами - иначе в Unity две части меша
+poly_piece = np.array(piece_names)[piece_of[[p.vertices[0] for p in me.polygons]]]
+mat_names = [m.name if m else '' for m in me.materials]
+quality_poly = np.array([mat_names[p.material_index] == cfg.get('quality_material') for p in me.polygons])
+tex_slot = next(i for i, m in enumerate(me.materials)
+                if m and m.node_tree and any(n.type == 'TEX_IMAGE' for n in m.node_tree.nodes))
+for k in reversed(range(len(me.materials))):
+    if k != tex_slot:
+        me.materials.pop(index=k)
+for p in me.polygons:
+    p.material_index = 0
+tex_nodes = {n.image.name: n for n in me.materials[0].node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
+base = next(n.image for k, n in tex_nodes.items() if not any(s in k for s in ('normal', 'roughness', 'metallic')))
+normal = next(n.image for k, n in tex_nodes.items() if 'normal' in k)
+roughness = next(n.image for k, n in tex_nodes.items() if 'roughness' in k)
+tex_dir = stem + '_Textures'
+
+
+def pixels(img):
+    img = img.copy()
+    img.scale(TEXTURE_SIZE, TEXTURE_SIZE)
+    a = np.empty(TEXTURE_SIZE * TEXTURE_SIZE * 4, np.float32)
+    img.pixels.foreach_get(a)
+    bpy.data.images.remove(img)
+    return a.reshape(-1, 4)
+
+
+def save(a, file_name, colorspace):
+    os.makedirs(tex_dir, exist_ok=True)
+    img = bpy.data.images.new(file_name, TEXTURE_SIZE, TEXTURE_SIZE, alpha=True)
+    img.colorspace_settings.name = colorspace
+    img.pixels.foreach_set(a.ravel())
+    img.filepath_raw = os.path.join(tex_dir, file_name)
+    img.file_format = 'PNG'
+    img.save()
+    print(f'[Pants] texture {img.filepath_raw}')
+    return img
+
+
+tex_px = {'base': pixels(base), 'normal': pixels(normal), 'roughness': pixels(roughness)}
+if 'texture' in cfg:
+    # sun: текстура модели - целого персонажа, на штанах шум, царапины, пятна кожи (gear_texture.clean). Чистится до
+    # посадки: узор солнц рисуется по форме модели, а снимки --png показывают уже чистую текстуру
+    S_ = TEXTURE_SIZE
+    cleaned = gear_texture.clean(me, src_co_pre, poly_piece, quality_poly, *(tex_px[k].reshape(S_, S_, 4) for k in
+                                 ('base', 'normal', 'roughness')), S_, cfg['texture'], tag='[Pants]')
+    tex_px = {k: a.reshape(-1, 4) for k, a in zip(('base', 'normal', 'roughness'), cleaned)}
+    view = bpy.data.images.new(name + '_clean', S_, S_, alpha=True)
+    view.pixels.foreach_set(tex_px['base'].ravel())
+    tex_nodes[base.name].image = view
 gen_view = pants.copy()  # модель как есть - для снимков рядом
 gen_view.data = me.copy()
 bpy.context.scene.collection.objects.link(gen_view)
@@ -661,6 +748,12 @@ if cfg['wraps']:
     # проходила сквозь неё - щели на нижней ленте (gear_fit.push_faces_off_skin)
     push_faces_off_skin(co, [t for t in tris if all(is_wrap[k] for k in t)], body_bvh, WRAP_FACE_GAP,
                         tag='[Pants]', what='wrap faces')
+if cfg.get('face_gap'):
+    # sun: ткань крупными гранями (после деления до 16 мм) - между вершинами грань провисает к коже
+    # ниже ANKLE_TOP низ штанин в голенище: ближайшая кожа там - верх стопы, и край штанины уходил по её нормали
+    # плоским кольцом сквозь ботинок
+    push_faces_off_skin(co, [t for t in tris if all(is_shell[k] and co[k][2] > ANKLE_TOP for k in t)], body_bvh,
+                        SHELL_FACE_GAP, tag='[Pants]', what='cloth faces')
 for i, v in enumerate(me.vertices):
     v.co = Vector(co[i])
 me.update()
@@ -966,42 +1059,20 @@ with open(stem + '_BodyMask.json', 'w', encoding='utf-8') as f:
                'hidden': [round(float(c), 6) for i in hidden for c in body_rest[i]]}, f)
 print(f'[Pants] mask {stem}_BodyMask.json')
 
-images = {n.image.name: n.image for n in me.materials[0].node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
-base = next(i for n, i in images.items() if not any(k in n for k in ('normal', 'roughness', 'metallic')))
-normal = next(i for n, i in images.items() if 'normal' in n)
-roughness = next(i for n, i in images.items() if 'roughness' in n)
-tex_dir = stem + '_Textures'
-os.makedirs(tex_dir, exist_ok=True)
-
-
-def pixels(img):
-    img = img.copy()
-    img.scale(TEXTURE_SIZE, TEXTURE_SIZE)
-    a = np.empty(TEXTURE_SIZE * TEXTURE_SIZE * 4, np.float32)
-    img.pixels.foreach_get(a)
-    bpy.data.images.remove(img)
-    return a.reshape(-1, 4)
-
-
-def save(a, file_name, colorspace):
-    img = bpy.data.images.new(file_name, TEXTURE_SIZE, TEXTURE_SIZE, alpha=True)
-    img.colorspace_settings.name = colorspace
-    img.pixels.foreach_set(a.ravel())
-    img.filepath_raw = os.path.join(tex_dir, file_name)
-    img.file_format = 'PNG'
-    img.save()
-    print(f'[Pants] texture {img.filepath_raw}')
-
-
-base_px = pixels(base)
+base_px = tex_px['base']
 if cfg['wraps']:
     # на текстуре модели между лентами обмоток - кожа голени: розовые полосы на лентах (gear_fit.fill_skin_on_texture)
     base_px = fill_skin_on_texture(base_px, TEXTURE_SIZE, me, is_band, WRAP_BLEED, tag='[Pants]', what='wraps texture')
 save(base_px, f'{name}.png', 'sRGB')
-save(pixels(normal), f'{name}_normal.png', 'Non-Color')
+save(tex_px['normal'], f'{name}_normal.png', 'Non-Color')
 ms = np.zeros((TEXTURE_SIZE * TEXTURE_SIZE, 4), np.float32)
-ms[:, 3] = 1.0 - pixels(roughness)[:, 0]
+ms[:, 3] = 1.0 - tex_px['roughness'][:, 0]
 save(ms, f'{name}_metallic_smoothness.png', 'Non-Color')
+if cfg.get('quality_material'):
+    # маска цвета качества - по граням, которые пометил пользователь (у sun полосы - сами грани повязок и обмоток)
+    q = gear_texture.face_mask(me, quality_poly, TEXTURE_SIZE)
+    save((np.repeat(q.reshape(-1, 1), 4, 1) * [1, 1, 1, 0] + [0, 0, 0, 1]).astype(np.float32), f'{name}_quality.png',
+         'Non-Color')
 
 for o in [gen_view, body] + [c[1] for c in chests] + [b[1] for b in boots] + gen_body:
     bpy.data.objects.remove(o)

@@ -9,8 +9,8 @@ using UnityEngine;
 /// персонажа и сразу сохраняет пустой Carried: закрыл игру посреди вылазки — снаряжение потеряно.
 /// После эвакуации всё из рюкзака уходит на склад, чертежи открывают рецепты.
 ///
-/// Снаряжение — записи в gear (GearPiece). Надетое не из базового набора в начале вылазки так же уходит из профиля
-/// (TakeWornForRaid) и возвращается надетым после эвакуации. Базовый набор есть всегда и не теряется.
+/// Снаряжение — записи в gear (GearPiece). Надетое, кроме бесплатного серого базового набора, в начале вылазки так же уходит из профиля
+/// (TakeWornForRaid) и возвращается надетым после эвакуации. Бесплатный базовый набор есть всегда и не теряется.
 /// </summary>
 public static class Profile
 {
@@ -27,6 +27,8 @@ public static class Profile
         public int raids;
         public int extractions;
         public System.Collections.Generic.List<GearPiece> gear = new();
+        // Крафт (Crafting): опыт каждого комплекта, по номеру GearSet
+        public int[] setXp = new int[Gear.SetCount];
     }
 
     /// <summary>Чем кончилась последняя вылазка: показывается на базе один раз</summary>
@@ -68,10 +70,10 @@ public static class Profile
             Array.Resize(ref loaded.blueprints, Items.Count);
         // Сохранение до снаряжения: списка нет вовсе
         loaded.gear ??= new();
-        // Сохранение до цвета качества: у всех частей серое, а скрафченные тогда были белыми
-        foreach (var piece in loaded.gear)
-            if (!Gear.IsBasic(piece.kind) && piece.quality == GearQuality.Gray)
-                piece.quality = GearQuality.White;
+        // Сохранение до уровня комплектов или новый комплект в GearSet
+        loaded.setXp ??= new int[0];
+        if (loaded.setXp.Length != Gear.SetCount)
+            Array.Resize(ref loaded.setXp, Gear.SetCount);
         GiveBasicSet(loaded);
         return loaded;
     }
@@ -86,14 +88,19 @@ public static class Profile
         return fresh;
     }
 
-    /// <summary>Каждая часть базового набора есть в профиле одна; в пустой слот она сразу надевается</summary>
+    /// <summary>
+    /// Каждая серая часть базового набора есть в профиле одна, бесплатно; в пустой слот она сразу надевается.
+    /// Базовый набор на верстаке уже прокачан до Crafting.BasicStartLevel: его крафт сразу даёт белое
+    /// </summary>
     static void GiveBasicSet(Data profile)
     {
+        ref int basicXp = ref profile.setXp[(int)GearSet.Basic];
+        basicXp = Math.Max(basicXp, Crafting.XpForLevel(Crafting.BasicStartLevel));
         foreach (var kind in Gear.All)
         {
-            if (!Gear.IsBasic(kind) || profile.gear.Exists(p => p.kind == kind))
+            if (!Gear.IsBasic(kind) || profile.gear.Exists(p => p.kind == kind && Gear.IsFree(p)))
                 continue;
-            profile.gear.Add(new GearPiece { kind = kind, worn = WornIn(profile, Gear.Slot(kind)) == null });
+            profile.gear.Add(new GearPiece { kind = kind, quality = GearQuality.Gray, worn = WornIn(profile, Gear.Slot(kind)) == null });
         }
     }
 
@@ -130,12 +137,12 @@ public static class Profile
     }
 
     /// <summary>
-    /// Начало вылазки: надетое не из базового набора уходит из профиля, сохранение уже без него — как рюкзак
-    /// в TakeCarriedForRaid. Базовый набор остаётся в профиле: потерять его нельзя
+    /// Начало вылазки: надетое, кроме бесплатного серого базового набора, уходит из профиля, сохранение уже без него — как рюкзак
+    /// в TakeCarriedForRaid. Бесплатный базовый набор остаётся в профиле: потерять его нельзя (Gear.IsFree)
     /// </summary>
     public static System.Collections.Generic.List<GearPiece> TakeWornForRaid()
     {
-        var taken = Current.gear.FindAll(p => p.worn && !Gear.IsBasic(p.kind));
+        var taken = Current.gear.FindAll(p => p.worn && !Gear.IsFree(p));
         Current.gear.RemoveAll(taken.Contains);
         Save();
         return taken;
@@ -195,7 +202,8 @@ public static class Profile
     /// <summary>
     /// Эвакуация: чертежи открывают рецепты, всё остальное ложится на склад, кроме снаряжения —
     /// оно возвращается в рюкзак базы, чтобы не собирать его заново перед каждой вылазкой.
-    /// Надетые части (wornGear из TakeWornForRaid) возвращаются надетыми: пока шла вылазка, их слоты были пусты
+    /// Надетые части (wornGear из TakeWornForRaid) возвращаются надетыми: пока шла вылазка, их слоты были пусты.
+    /// Каждая вынесенная часть цветом выше обычного цвета её комплекта на верстаке даёт ему опыт (Crafting.Learn)
     /// </summary>
     public static void Extract(ItemCounts brought, System.Collections.Generic.List<GearPiece> wornGear)
     {
@@ -205,6 +213,7 @@ public static class Profile
             if (basic != null)
                 basic.worn = false;
             piece.worn = true;
+            Crafting.Learn(piece);
             Current.gear.Add(piece);
         }
         var unlocked = new System.Collections.Generic.List<string>();
@@ -241,7 +250,7 @@ public static class Profile
         foreach (var piece in wornGear)
         {
             var slot = Gear.Slot(piece.kind);
-            var basic = Current.gear.Find(p => Gear.IsBasic(p.kind) && Gear.Slot(p.kind) == slot);
+            var basic = Current.gear.Find(p => Gear.IsFree(p) && Gear.Slot(p.kind) == slot);
             if (basic != null && WornIn(slot) == null)
                 basic.worn = true;
         }

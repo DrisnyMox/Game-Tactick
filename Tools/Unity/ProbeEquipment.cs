@@ -7,7 +7,8 @@ using UnityEngine;
 
 // Окно снаряжения в Play (сцена Base): каждый запуск снимает экран (что сделал прошлый шаг) в
 // Temp/EquipmentShots/<номер>_<шаг>.png и через кадр делает следующий шаг. Шаги: открыть окно (в профиль
-// добавляются зелёная туника, синие и оранжевые ботинки кочевника), выбрать нагрудник, надеть тунику, выбрать
+// добавляются зелёная туника, синие и оранжевые ботинки кочевника, надеваются зелёные штаны и фиолетовые перчатки
+// базового набора), выбрать нагрудник, надеть тунику, выбрать
 // оранжевые ботинки, надеть их, выбрать шлем, закрыть окно. Последний запуск снимает игрока в мире и возвращает профиль, каким он был
 // до первого шага (ключ Profile.v1 копируется в PlayerPrefs и обратно).
 // Перед запуском: editor_play, editor_focus, set_autotick --enable true (CLAUDE.md, «Проверка после правки кода»).
@@ -68,6 +69,14 @@ public static class ProbeEquipment
                 gear.Add(new GearPiece { kind = GearKind.NomadChest, quality = GearQuality.Green });
                 gear.Add(new GearPiece { kind = GearKind.NomadBoots, quality = GearQuality.Blue });
                 gear.Add(new GearPiece { kind = GearKind.NomadBoots, quality = GearQuality.Orange });
+                // Скрафченный базовый набор в цвете: ремни штанов и манжета перчаток красятся по маске
+                var pants = new GearPiece { kind = GearKind.ClothPantsRope, quality = GearQuality.Green };
+                var gloves = new GearPiece { kind = GearKind.ClothGloves, quality = GearQuality.Purple };
+                gear.Add(pants);
+                gear.Add(gloves);
+                Profile.Wear(pants);
+                Profile.Wear(gloves);
+                Gear.Dress(worn, Profile.Worn());
                 Call(screen, "Open");
                 break;
             case "chest":

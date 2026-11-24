@@ -7,8 +7,7 @@ using UnityEngine.SceneManagement;
 /// E или Esc закрывает. Пока окно открыто, ввод игрока выключен и курсор свободен (LoopGui.SetModal).
 ///  * Склад — что лежит на складе и что в рюкзаке; снаряжение перекладывается между ними. В вылазку идёт рюкзак.
 ///  * Торговец — продажа со склада за кредиты, покупка патронов и аптечек на склад.
-///  * Верстак — рецепты Recipe.All: тратят материалы со склада, результат кладут на склад.
-///    Рецепт с чертежом закрыт, пока чертёж не вынесен с вылазки.
+///  * Верстак — своё окно на Canvas (WorkbenchScreen): крафт снаряжения и припасов.
 ///  * Причал — выход в вылазку (сцена Raid).
 /// После вылазки сначала показывается её итог (Profile.LastRaid).
 /// Сцену и места собирает Tools/Unity/SetupBase.cs.
@@ -17,13 +16,13 @@ public class BaseHub : MonoBehaviour
 {
     [SerializeField] GameObject player;
     [SerializeField] BaseStation[] stations;
+    [Tooltip("Окно верстака: у верстака E открывает его вместо окна базы")]
+    [SerializeField] WorkbenchScreen workbench;
 
     BaseStation near;
     BaseStation open;
     bool showResult;
     Vector2 scroll;
-    // Последняя часть, сделанная на верстаке, пока окно открыто: цвет качества выпадает случайно, его надо показать
-    GearPiece crafted;
     float resetArmedUntil = -1f;
     GUIStyle title, text, button, small;
 
@@ -69,12 +68,18 @@ public class BaseHub : MonoBehaviour
                 Close();
             return;
         }
-        // Открыто окно снаряжения (EquipmentScreen): места базы не открываются
-        if (near != null && keyboard.eKey.wasPressedThisFrame && !SettingsMenu.IsOpen && !LoopGui.ModalOpen)
+        // Открыто окно снаряжения или верстака: места базы не открываются. Окно верстака закрывается тем же E:
+        // в кадре закрытия оно не должно открыться снова
+        if (near != null && keyboard.eKey.wasPressedThisFrame && !SettingsMenu.IsOpen && !LoopGui.ModalOpen &&
+            LoopGui.ClosedFrame != Time.frameCount)
         {
+            if (near.Kind == BaseStation.StationKind.Workbench)
+            {
+                workbench.Open();
+                return;
+            }
             open = near;
             scroll = Vector2.zero;
-            crafted = null;
             LoopGui.SetModal(true, player);
         }
     }
@@ -98,7 +103,7 @@ public class BaseHub : MonoBehaviour
 
     void OnGUI()
     {
-        // OnGUI рисуется поверх любого Canvas: под меню настроек и окном снаряжения надписи базы не нужны
+        // OnGUI рисуется поверх любого Canvas: под меню настроек, окнами снаряжения и верстака надписи базы не нужны
         if (SettingsMenu.IsOpen || LoopGui.ModalOpen && open == null && !showResult)
             return;
         int font = LoopGui.FontSize;
@@ -137,9 +142,6 @@ public class BaseHub : MonoBehaviour
                 break;
             case BaseStation.StationKind.Trader:
                 DrawTrader();
-                break;
-            case BaseStation.StationKind.Workbench:
-                DrawWorkbench();
                 break;
             case BaseStation.StationKind.Exit:
                 DrawExit();
@@ -292,78 +294,6 @@ public class BaseHub : MonoBehaviour
         profile.stash[id] -= count;
         profile.credits += count * Items.SellPrice(id);
         Profile.Save();
-    }
-
-    void DrawWorkbench()
-    {
-        var profile = Profile.Current;
-        GUILayout.Label("Материалы берутся со склада, готовое ложится на склад.", text);
-        GUILayout.Space(8);
-        foreach (var recipe in Recipe.All)
-        {
-            bool unlocked = Profile.IsUnlocked(recipe);
-            bool enough = true;
-            var cost = new System.Text.StringBuilder();
-            foreach (var (item, count) in recipe.cost)
-            {
-                bool has = profile.stash[item] >= count;
-                enough &= has;
-                cost.Append(cost.Length > 0 ? ",  " : "")
-                    .Append(has ? "<color=#9be59b>" : "<color=#ff8a7a>")
-                    .Append(Items.Name(item)).Append(' ').Append(profile.stash[item]).Append('/').Append(count).Append("</color>");
-            }
-
-            GUILayout.BeginHorizontal();
-            string name = recipe.amount > 1 ? $"{Items.Name(recipe.result)} ×{recipe.amount}" : Items.Name(recipe.result);
-            string line = unlocked ? $"<b>{name}</b>\n{cost}" : $"<b>{name}</b>\n<color=#888888>нужен {Items.Name(recipe.blueprint.Value).ToLower()} — найди его на вылазке</color>";
-            GUILayout.Label(line, text, GUILayout.ExpandWidth(true));
-            GUI.enabled = unlocked && enough;
-            if (GUILayout.Button("Сделать", small, GUILayout.Width(text.fontSize * 7)))
-            {
-                foreach (var (item, count) in recipe.cost)
-                    profile.stash[item] -= count;
-                profile.stash[recipe.result] += recipe.amount;
-                Profile.Save();
-            }
-            GUI.enabled = true;
-            GUILayout.EndHorizontal();
-            GUILayout.Space(6);
-        }
-
-        GUILayout.Space(6);
-        GUILayout.Label("<b>Снаряжение</b>  <color=#9aa3ab>— надевается в окне [I], цвет качества выпадает случайно</color>", text);
-        if (crafted != null)
-            GUILayout.Label($"Сделано: <b>{Gear.Name(crafted.kind)}</b>, <color=#{ColorUtility.ToHtmlStringRGB(Gear.QualityColor(crafted.quality))}>" +
-                            $"{Gear.QualityName(crafted.quality).ToLower()}</color>", text);
-        foreach (var recipe in GearRecipe.All)
-        {
-            bool enough = true;
-            var cost = new System.Text.StringBuilder();
-            foreach (var (item, count) in recipe.cost)
-            {
-                bool has = profile.stash[item] >= count;
-                enough &= has;
-                cost.Append(cost.Length > 0 ? ",  " : "")
-                    .Append(has ? "<color=#9be59b>" : "<color=#ff8a7a>")
-                    .Append(Items.Name(item)).Append(' ').Append(profile.stash[item]).Append('/').Append(count).Append("</color>");
-            }
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"<b>{Gear.Name(recipe.result)}</b>  <color=#9aa3ab>{Gear.SlotName(Gear.Slot(recipe.result)).ToLower()}</color>\n{cost}",
-                text, GUILayout.ExpandWidth(true));
-            GUI.enabled = enough;
-            if (GUILayout.Button("Сделать", small, GUILayout.Width(text.fontSize * 7)))
-            {
-                foreach (var (item, count) in recipe.cost)
-                    profile.stash[item] -= count;
-                var piece = new GearPiece { kind = recipe.result, quality = Gear.RollCraftQuality() };
-                profile.gear.Add(piece);
-                Profile.Save();
-                crafted = piece;
-            }
-            GUI.enabled = true;
-            GUILayout.EndHorizontal();
-            GUILayout.Space(6);
-        }
     }
 
     void DrawExit()

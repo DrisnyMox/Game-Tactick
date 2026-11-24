@@ -25,6 +25,8 @@ description: Посадка надеваемой части снаряжения
 2. **Запись в `PARTS`** скрипта части (штаны — `place_pants.py`, новая запись и `--part`). Задать: под какие части
    заправляется край (`chests` — пояс под нагрудник, `boots` — низ в голенище), `z_range`, `cap`/`ankle_top`,
    `mask='unseen'`, `shell=dict(pieces, follow, split=0.016, loose=0.008)`.
+   Места под цвет качества, помеченные пользователем отдельным материалом, — `quality_material` (маска по граням);
+   грязная текстура модели — `texture` (чистка `gear_texture.py`, снимки до и после показать до посадки, как у `SunPants`).
 3. **Запуск с `--png`** в Blender (`E:\Software\Blender\blender.exe --background --factory-startup --python ...`,
    системного Python нет). Что делается по шагам `gear_fit.py`:
    - `split_long_edges` — рёбра ткани длиннее `split` делятся: крупные грани не прогнутся по телу;
