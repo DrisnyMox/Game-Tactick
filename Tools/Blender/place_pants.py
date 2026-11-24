@@ -93,6 +93,10 @@ PARTS = {
                                                            'part_014', 'part_015', 'part_016', 'part_017', 'part_018',
                                                            'part_019', 'part_020', 'part_021', 'part_022', 'part_023'),
                            split=0.016, loose=0.008),
+                # узел пояса сзади (part_015) и две ленточки из него (part_011, part_012) висят от пояса: веса с ближайшей
+                # кожи (ягодицы, бёдра) вели их за ногами
+                hips_only=('part_011', 'part_012', 'part_015'),
+                hanging=dict(pieces=('part_011', 'part_012'), knot=('part_015',)),
                 face_gap=True, quality_material='01 - Default',
                 texture=dict(
                     quality_material='01 - Default',
@@ -127,6 +131,9 @@ ANKLE_LOW = (0.105, 0.13)
 TEXTURE_SIZE = 2048    # штаны на экране крупнее ботинок и перчаток
 WRAP_FACE_GAP = 0.001  # nomad: точки внутри граней лент обмоток над кожей не ближе
 SHELL_FACE_GAP = 0.001  # sun: и точки внутри граней ткани
+HANG_GAP = 0.002       # sun: ленточки узла не ближе к ткани штанов
+HANG_STEP = 0.002      # sun: ленточки отходят от ткани ступенями по высоте
+HANG_MAX = 0.04        # sun: и не дальше
 WRAP_BLEED = 6        # nomad: кожа на текстуре вокруг лент обмоток заливается на столько пикселей
 STEP = 0.01            # шаг срезов по высоте
 LEG_REACH = 0.085      # луч от центра ноги дальше этого уходит к другой ноге
@@ -271,6 +278,7 @@ is_wrap = is_band | np.isin(piece_of, [piece_names.index(n) for n in cfg['knots'
 shell_pieces = cfg['shell']['pieces'] if cfg['shell'] else ()
 is_shell = np.isin(piece_of, [piece_names.index(n) for n in shell_pieces])
 is_follow = np.isin(piece_of, [piece_names.index(n) for n in (cfg['shell']['follow'] if cfg['shell'] else ())])
+is_hips_only = np.isin(piece_of, [piece_names.index(n) for n in cfg.get('hips_only', ())])
 me.attributes.remove(me.attributes['piece'])
 src_co_pre = np.array([tuple(v.co) for v in me.vertices])
 # Грани под цвет качества пользователь пометил отдельным материалом (sun): запоминаются, затем у штанов один материал
@@ -754,6 +762,42 @@ if cfg.get('face_gap'):
     # плоским кольцом сквозь ботинок
     push_faces_off_skin(co, [t for t in tris if all(is_shell[k] and co[k][2] > ANKLE_TOP for k in t)], body_bvh,
                         SHELL_FACE_GAP, tag='[Pants]', what='cloth faces')
+if cfg.get('hanging'):
+    # sun: ленточки узла висят отвесно, как на модели. Вслед за тканью по вершинам они повторяли форму ягодиц до
+    # самого низа и смотрелись приклеенными. Здесь каждая сдвигается целиком, как узел, затем по высоте отходит
+    # назад (+Y) настолько, чтобы не заходить в ткань и кожу, и ниже не возвращается: лента лежит на ягодице до
+    # самой выпуклой точки, дальше висит отвесно
+    knot = np.isin(piece_of, [piece_names.index(n) for n in cfg['hanging']['knot']])
+    move = co[knot].mean(0) - src_co[knot].mean(0)
+    cloth_bvh = BVHTree.FromPolygons([Vector(p) for p in co], [t for t in tris if all(is_shell[k] for k in t)])
+
+    def clear_of(P):
+        # внутри - если сзади (+Y) от точки ещё есть ткань или кожа. По нормали ближайшей грани нельзя: у пояса
+        # несколько слоёв ткани, ближайшим оказывался внутренний, и ленточка уходила назад до предела
+        back = Vector((0, 1, 0))
+        for p in P:
+            for bvh, gap in ((cloth_bvh, HANG_GAP), (body_bvh, GAP)):
+                if bvh.ray_cast(Vector(p), back, 0.1)[0] is not None:
+                    return False
+                loc, _, _, _ = bvh.find_nearest(Vector(p), gap)
+                if loc is not None:
+                    return False
+        return True
+
+    for pname in cfg['hanging']['pieces']:
+        m = np.flatnonzero(piece_of == piece_names.index(pname))
+        P = src_co[m] + move
+        top = P[:, 2].max()
+        level = ((top - P[:, 2]) / HANG_STEP).astype(int)
+        need = np.zeros(level.max() + 1)
+        for li in range(len(need)):
+            at_level = P[level == li]
+            while need[li] < HANG_MAX and not clear_of(at_level + [0, need[li], 0]):
+                need[li] += 0.001
+        need = np.maximum.accumulate(need)  # сверху вниз: отошедшая лента назад не возвращается
+        co[m] = P + np.stack([np.zeros(len(P)), need[level], np.zeros(len(P))], 1)
+        print(f'[Pants] {pname} hangs from the knot: back from the knot by height (mm) ' +
+              ', '.join(f'{li * HANG_STEP * 1000:.0f}:{need[li] * 1000:.0f}' for li in range(0, len(need), 4)))
 for i, v in enumerate(me.vertices):
     v.co = Vector(co[i])
 me.update()
@@ -856,6 +900,12 @@ bpy.context.view_layer.objects.active = pants
 bpy.ops.object.modifier_apply(modifier=transfer.name)
 # группы без весов убираются целиком: иначе у вершины остаётся лишняя кость (Docs/Gear.md, «Веса после переноса»)
 limit_bones(pants)
+if is_hips_only.any():
+    # sun: узел и ленточки целиком на тазу - висят от пояса и не повторяют движения бёдер
+    for g in pants.vertex_groups:
+        g.remove([int(i) for i in np.flatnonzero(is_hips_only)])
+    pants.vertex_groups['Hips'].add([int(i) for i in np.flatnonzero(is_hips_only)], 1.0, 'REPLACE')
+    print(f'[Pants] knot and ribbons on Hips only: {int(is_hips_only.sum())} verts')
 bad = [v.index for v in me.vertices if not v.groups]
 if bad or max(len(v.groups) for v in me.vertices) > SKIN_BONES:
     raise RuntimeError(f'{name}: bad weights ({len(bad)} vertices without bones)')
