@@ -258,14 +258,16 @@ def sphere_dirs(n=160):
     return dirs
 
 
-def seen_from_outside(p, n, dirs, bvhs, max_slope=0.5):
+def seen_from_outside(p, n, dirs, bvhs, max_slope=0.5, up_slope=None):
     """Кожа видна снаружи, если хоть один луч от неё уходит, ничего не задев. Лучи круче max_slope (sin угла) вниз
-    не берутся - камера не смотрит снизу вверх под часть; и вверх - у плотной ткани луч вверх уходит только по зазору
-    в 1-3 мм между тканью и телом до края (кожа в паху считалась видной и в приседе выходила сквозь шорты)."""
+    не берутся - камера не смотрит снизу вверх под часть; и вверх (up_slope, по умолчанию тот же) - у плотной ткани
+    луч вверх уходит только по зазору в 1-3 мм между тканью и телом до края (кожа в паху считалась видной и в приседе
+    выходила сквозь шорты). У верха вверх смотрят горловина и проймы: там up_slope больше 1."""
     p = Vector(p) + Vector(n) * 0.0005
     n = Vector(n)
+    up_slope = max_slope if up_slope is None else up_slope
     for dv in dirs:
-        if dv.dot(n) <= 0.05 or abs(dv.z) > max_slope:
+        if dv.dot(n) <= 0.05 or dv.z < -max_slope or dv.z > up_slope:
             continue
         if all(t.ray_cast(p, dv, 1.0)[0] is None for t in bvhs):
             return True

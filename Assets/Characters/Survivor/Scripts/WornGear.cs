@@ -14,8 +14,10 @@ public class WornGear : MonoBehaviour
     struct Piece
     {
         public SkinnedMeshRenderer renderer;
-        // Треугольники тела под частью: номер по всем подмешам тела подряд
-        public int[] hiddenTriangles;
+        // Вершины тела под частью (номера в меше тела). Прячется треугольник, у которого все вершины под
+        // надетыми частями вместе: у щиколотки треугольник кожи одной вершиной под штанами, другой под обувью,
+        // и по отдельности его не прятала ни одна часть
+        public int[] hiddenVertices;
     }
 
     [SerializeField] SkinnedMeshRenderer body;
@@ -27,11 +29,12 @@ public class WornGear : MonoBehaviour
     Mesh maskedMesh;
     MaterialPropertyBlock block;
     readonly List<int> triangles = new();
-    readonly HashSet<int> hidden = new();
+    bool[] hidden;
 
     void Awake()
     {
         sourceMesh = body.sharedMesh;
+        hidden = new bool[sourceMesh.vertexCount];
         block = new MaterialPropertyBlock();
     }
 
@@ -69,11 +72,16 @@ public class WornGear : MonoBehaviour
     /// <summary>Прячет тело под надетыми (включёнными) частями. Звать после того, как часть надета или снята.</summary>
     public void Refresh()
     {
-        hidden.Clear();
+        Array.Clear(hidden, 0, hidden.Length);
+        bool any = false;
         foreach (var piece in pieces)
             if (piece.renderer.gameObject.activeSelf)
-                hidden.UnionWith(piece.hiddenTriangles);
-        if (hidden.Count == 0)
+                foreach (int v in piece.hiddenVertices)
+                {
+                    hidden[v] = true;
+                    any = true;
+                }
+        if (!any)
         {
             body.sharedMesh = sourceMesh;
             return;
@@ -85,7 +93,6 @@ public class WornGear : MonoBehaviour
             maskedMesh = Instantiate(sourceMesh);
             maskedMesh.name = sourceMesh.name + " (WornGear)";
         }
-        int first = 0;
         for (int sub = 0; sub < sourceMesh.subMeshCount; sub++)
         {
             sourceMesh.GetTriangles(triangles, sub);
@@ -93,7 +100,7 @@ public class WornGear : MonoBehaviour
             int kept = 0;
             for (int t = 0; t < count; t++)
             {
-                if (hidden.Contains(first + t))
+                if (hidden[triangles[t * 3]] && hidden[triangles[t * 3 + 1]] && hidden[triangles[t * 3 + 2]])
                     continue;
                 triangles[kept * 3] = triangles[t * 3];
                 triangles[kept * 3 + 1] = triangles[t * 3 + 1];
@@ -102,7 +109,6 @@ public class WornGear : MonoBehaviour
             }
             triangles.RemoveRange(kept * 3, triangles.Count - kept * 3);
             maskedMesh.SetTriangles(triangles, sub, false);
-            first += count;
         }
         body.sharedMesh = maskedMesh;
     }

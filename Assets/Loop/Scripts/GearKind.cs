@@ -12,4 +12,6 @@ public enum GearKind
     NomadPants = 6,
     NomadGloves = 7,
     SunPants = 8,
+    SunChest = 9,
+    SunShoes = 10,
 }

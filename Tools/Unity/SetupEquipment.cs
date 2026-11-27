@@ -153,7 +153,7 @@ public static class SetupEquipment
     static (float pitch, float yaw, bool oneSide) View(GearKind kind) => kind switch
     {
         GearKind.ClothGloves or GearKind.NomadGloves => (12f, -35f, true),
-        GearKind.ClothBoots or GearKind.NomadBoots => (16f, -38f, true),
+        GearKind.ClothBoots or GearKind.NomadBoots or GearKind.SunShoes => (16f, -38f, true),
         GearKind.ClothPantsRope or GearKind.NomadPants or GearKind.SunPants => (6f, -22f, false),
         _ => (8f, -24f, false),
     };

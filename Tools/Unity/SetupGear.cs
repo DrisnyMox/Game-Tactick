@@ -33,16 +33,16 @@ public static class SetupGear
     const string ShaderName = "Game Tactick/Gear";
     // На вариант ставятся все части из Folder: что надеть, в игре решает профиль (Gear.Dress, окно снаряжения
     // EquipmentScreen). ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots
-    // и NomadBoots ставит без смены формы place_gear.py, ClothPantsRope, NomadPants и SunPants - place_pants.py,
-    // NomadChest - place_chest.py, NomadGloves - place_gloves.py: файлы у всех одинаковые. Parts - части, включённые
-    // в префабе: так игрок одет в сценах без профиля (SampleScene, SurvivorPlayground) и в пробах снаряжения; остальные
-    // стоят выключенными
-    static readonly string[] Parts = { "NomadChest", "NomadGloves", "NomadBoots", "SunPants" };
+    // NomadBoots и SunShoes ставит без смены формы place_gear.py, ClothPantsRope, NomadPants и SunPants - place_pants.py,
+    // NomadChest - place_chest.py, SunChest - place_chest_fitted.py, NomadGloves - place_gloves.py: файлы у всех
+    // одинаковые. Parts - части, включённые в префабе: так игрок одет в сценах без профиля (SampleScene,
+    // SurvivorPlayground) и в пробах снаряжения; остальные стоят выключенными
+    static readonly string[] Parts = { "SunChest", "NomadGloves", "SunShoes", "SunPants" };
     // Части из одного слоя ткани с открытыми краями: у NomadChest между поясом-обмоткой и подолом, у горловины
     // и под накидкой видна изнанка, у NomadPants - внутри широкой штанины шорт и с изнанки лент обмоток, у NomadGloves -
-    // в отверстиях для пальцев и в манжете, у SunPants - внутри пояса сверху. С одной стороной граней в эти щели был
-    // виден фон (тело под частью спрятано)
-    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves", "SunPants" };
+    // в отверстиях для пальцев и в манжете, у SunPants - внутри пояса сверху, у SunChest - в проймах, в разрезе подола
+    // спереди и под наплечником. С одной стороной граней в эти щели был виден фон (тело под частью спрятано)
+    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves", "SunPants", "SunChest" };
 
     // Заполняет JsonUtility
 #pragma warning disable CS0649
@@ -120,10 +120,10 @@ public static class SetupGear
 
             piece.gameObject.SetActive(Parts.Contains(part));
 
-            var hidden = HiddenTriangles(part, body.sharedMesh, bodyImporter.globalScale, log);
+            var hidden = HiddenVertices(part, body.sharedMesh, bodyImporter.globalScale, log);
             pieces.Add((smr, hidden));
-            log.AppendLine($"{part}: verts {source.sharedMesh.vertexCount}, hidden body triangles {hidden.Length}" +
-                           (Parts.Contains(part) ? ", надета" : ""));
+            log.AppendLine($"{part}: verts {source.sharedMesh.vertexCount}, hidden body triangles " +
+                           $"{HiddenTriangleCount(body.sharedMesh, hidden)}" + (Parts.Contains(part) ? ", надета" : ""));
         }
 
         var worn = root.GetComponent<WornGear>();
@@ -137,10 +137,10 @@ public static class SetupGear
         {
             var item = list.GetArrayElementAtIndex(i);
             item.FindPropertyRelative("renderer").objectReferenceValue = pieces[i].renderer;
-            var tris = item.FindPropertyRelative("hiddenTriangles");
-            tris.arraySize = pieces[i].hidden.Length;
+            var verts = item.FindPropertyRelative("hiddenVertices");
+            verts.arraySize = pieces[i].hidden.Length;
             for (int k = 0; k < pieces[i].hidden.Length; k++)
-                tris.GetArrayElementAtIndex(k).intValue = pieces[i].hidden[k];
+                verts.GetArrayElementAtIndex(k).intValue = pieces[i].hidden[k];
         }
         so.ApplyModifiedPropertiesWithoutUndo();
 
@@ -170,7 +170,10 @@ public static class SetupGear
         }
     }
 
-    static int[] HiddenTriangles(string part, Mesh body, float scale, StringBuilder log)
+    // Вершины тела под частью (номера в меше тела). Треугольники прячет WornGear по всем надетым частям вместе:
+    // треугольник кожи у щиколотки (4 см) одной вершиной под штанами, другой под кедами - по отдельности его не
+    // прятала ни одна часть, и кожа проступала между низом штанин и голенищем
+    static int[] HiddenVertices(string part, Mesh body, float scale, StringBuilder log)
     {
         var mask = JsonUtility.FromJson<BodyMask>(AssetDatabase.LoadAssetAtPath<TextAsset>(Folder + part + "_BodyMask.json").text);
         var vertices = body.vertices;
@@ -195,18 +198,23 @@ public static class SetupGear
                 throw new System.InvalidOperationException(
                     $"{part}: вершина маски {p} не найдена на теле, ближайшая в {Mathf.Sqrt(nearest):F5} м");
         }
-        var result = new List<int>();
-        int first = 0;
+        log.AppendLine($"{part}: mask {mask.hidden.Length / 3} positions -> {hiddenVerts.Count} body vertices");
+        return hiddenVerts.OrderBy(i => i).ToArray();
+    }
+
+    // Для отчёта: сколько треугольников тела часть прячет одна
+    static int HiddenTriangleCount(Mesh body, int[] hiddenVerts)
+    {
+        var set = new HashSet<int>(hiddenVerts);
+        int count = 0;
         for (int sub = 0; sub < body.subMeshCount; sub++)
         {
             var tris = body.GetTriangles(sub);
             for (int t = 0; t < tris.Length / 3; t++)
-                if (hiddenVerts.Contains(tris[t * 3]) && hiddenVerts.Contains(tris[t * 3 + 1]) && hiddenVerts.Contains(tris[t * 3 + 2]))
-                    result.Add(first + t);
-            first += tris.Length / 3;
+                if (set.Contains(tris[t * 3]) && set.Contains(tris[t * 3 + 1]) && set.Contains(tris[t * 3 + 2]))
+                    count++;
         }
-        log.AppendLine($"{part}: mask {mask.hidden.Length / 3} positions -> {hiddenVerts.Count} body vertices");
-        return result.ToArray();
+        return count;
     }
 
     static Material BuildMaterial(string part, StringBuilder log)

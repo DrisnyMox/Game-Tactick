@@ -18,10 +18,11 @@ import numpy as np
 from mathutils import Vector
 from mathutils.kdtree import KDTree
 
-NAVY, GREY, BRASS, LEATHER, COPPER = range(5)
+NAVY, GREY, BRASS, LEATHER, COPPER, BLACK = range(6)
 BAD = -1
 DEBUG = {}  # классы пикселей последней чистки - для снимков
-CLASS_NAMES = ('fabric', 'grey', 'brass', 'leather', 'copper')
+# black - низ подошвы SunShoes: классом по цвету не бывает, только заданный гранями (force_poly)
+CLASS_NAMES = ('fabric', 'grey', 'brass', 'leather', 'copper', 'black')
 
 
 def texel_map(me, size):
@@ -90,13 +91,31 @@ def features(c):
     return r, g, b, lum, sat
 
 
-def classify(c, grey_only, grey_ok, leather_ok):
+def skin_mask(c, cfg):
+    """Кожа персонажа на текстуре. У нагрудника SunChest кожи на текстуре нет, а бледная латунь (0,58 0,47 0,36)
+    по этому правилу - кожа: там оно выключено (cfg['skin'] False)."""
+    r, g, b, lum, sat = features(c)
+    if not cfg.get('skin', True):
+        return np.zeros(c.shape[:2], bool)
+    return (r - g > 0.07) & (g - b > 0.02) & (g - b < 0.16) & (lum > 0.42) & (r - b < 0.42)
+
+
+def brass_mask(c, cfg, lum_min=None):
+    """Латунь: (g-b, r-b, яркость для класса, яркость для деталей) из cfg['brass_rule']. По умолчанию - как
+    у SunPants; у SunChest латунь бледнее: g-b у неё 0,06-0,15."""
+    r, g, b, lum, sat = features(c)
+    gb, rb, lum_cls, lum_det = cfg.get('brass_rule', (0.12, 0.2, 0.26, 0.2))
+    return (g - b > gb) & (r - b > rb) & (lum > (lum_cls if lum_min is None else lum_det))
+
+
+def classify(c, grey_only, grey_ok, leather_ok, cfg=None):
     """Класс пикселя по цвету. grey_only - грани, помеченные пользователем под цвет качества (там только серая ткань),
     grey_ok - где серое может быть (на латуни серое - размытое пятно генератора), leather_ok - грани ремня."""
+    cfg = cfg or {}
     r, g, b, lum, sat = features(c)
-    skin = (r - g > 0.07) & (g - b > 0.02) & (g - b < 0.16) & (lum > 0.42) & (r - b < 0.42)
+    skin = skin_mask(c, cfg)
     grey = (sat < 0.14) & (lum > 0.40)
-    brass = (g - b > 0.12) & (r - b > 0.2) & (lum > 0.26) & ~skin
+    brass = brass_mask(c, cfg) & ~skin
     copper = (r - g > 0.16) & (r - b > 0.3) & (sat > 0.5) & ~brass
     leather = (r - b > 0.07) & (lum > 0.1) & (lum < 0.34) & ~brass & ~copper
     cls = np.full(c.shape[:2], NAVY, np.int8)
@@ -156,6 +175,8 @@ def inpaint(cls, lum, region, steps=400):
             best_cls[more] = k
             best_lum[more] = acc[more] / cnt[more]
         fill = todo & (best_cnt > 0)
+        if not fill.any():
+            break  # остались пиксели без соседей того же куска: дальше ничего не изменится
         cls[fill] = best_cls[fill]
         lum[fill] = best_lum[fill]
         todo &= ~fill
@@ -334,17 +355,23 @@ def bleed_into(img, good, todo, steps=300):
             cnt += np.roll(np.roll(good, dy, 0), dx, 1)
             acc += np.roll(np.roll(img * good[..., None], dy, 0), dx, 1)
         fill = todo & (cnt > 0)
+        if not fill.any():
+            break
         img[fill] = acc[fill] / cnt[fill][:, None]
         good |= fill
         todo &= ~fill
     return img
 
 
-def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag='[Tex]'):
+def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag='[Tex]', grey_poly=None,
+          force_poly=None, plain_poly=None):
     """Чистка текстур части по правилам cfg (place_pants.PARTS[...]['texture']). me - сетка с развёрткой и
     материалами, co - вершины (рисунок узора - по этой форме), poly_piece - имя куска модели у каждой грани,
     quality_poly - грани, помеченные пользователем под цвет качества (там только серая ткань), base/normal/rough -
-    пиксели size x size x 4. Возвращает новые (base, normal, rough)."""
+    пиксели size x size x 4. grey_poly - грани, где серое без пометки может быть (окантовка у края нагрудника SunChest;
+    светлое пятно посреди спины - мусор генератора), None - везде. force_poly - {имя класса: грани}: класс пикселей
+    этих граней задан, а не по цвету (кроме деталей). plain_poly - грани, которые не детали, даже если в латуни (рисунок
+    генератора, который стирается: солнце сбоку изнутри у SunShoes). Возвращает новые (base, normal, rough)."""
     lt_of, w, tri, poly = texel_map(me, size)
     inside = lt_of >= 0
     li = np.maximum(lt_of, 0)
@@ -362,10 +389,12 @@ def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag=
     # Мелкие детали (латунь, ячейки панелей, провода, решётка наколенников) - тонкие линии в 1-3 пикселя: класс
     # по соседям их стирает. Их пиксели остаются своими, только цвет подтягивается к картинке, а кожа и размытые
     # серые пятна заливаются соседями. Это куски hard и грани с латунью (наколенники)
-    brass_px = (g - b > 0.12) & (r - b > 0.2) & (lum > 0.2)
+    brass_px = brass_mask(rgb, cfg, lum_min=True)
     # окошки наколенников (тёмные ячейки и тонкая светлая решётка) - куски граней, со всех сторон окружённые латунью
     brassy = share(brass_px) > cfg['brass_share']
     hard_poly = np.isin(poly_piece, cfg['hard']) | brassy | enclosed(me, brassy, cfg['window_area'])
+    if plain_poly is not None:
+        hard_poly &= ~plain_poly
     # ткань под панелью на бедре: у панели в сетке два окна, и сквозь них видна ткань, на которую генератор
     # нарисовал продолжение решётки. Чистая ткань там выглядела дырой в панели
     # точка и нормаль ткани в каждом пикселе (по форме co)
@@ -376,12 +405,17 @@ def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag=
     tn /= np.maximum(np.linalg.norm(tn, axis=1, keepdims=True), 1e-12)
     nrm = tn[li]
     hard = hard_poly[pid] & inside & ~quality
-    near_panel = behind(me, V, np.isin(poly_piece, cfg['panel']), pos, nrm, inside & ~hard & ~quality, cfg['behind_reach'])
+    panel = np.isin(poly_piece, cfg['panel'])
+    near_panel = behind(me, V, panel, pos, nrm, inside & ~hard & ~quality, cfg['behind_reach']) if panel.any() else \
+        np.zeros_like(inside)
     hard |= near_panel
     # Ремень под коленом - грани, где коричневого больше половины: тёмно-рыжий ореол вокруг латуни на ткани - не ремень
     leather_px = (r - b > 0.07) & (lum > 0.1) & (lum < 0.34) & ~brass_px
     leather_ok = (share(leather_px) > 0.5)[pid] & inside
-    cls = classify(rgb, quality, inside & ~hard & ~quality, leather_ok)
+    grey_ok = inside & ~hard & ~quality
+    if grey_poly is not None:
+        grey_ok &= grey_poly[pid]
+    cls = classify(rgb, quality, grey_ok, leather_ok, cfg)
     cls[~inside] = BAD
     soft = inside & ~hard
     # серое на ткани - только полосы толще 2 пикселей: светлые царапины на ткани уходят, а полосы по шву и решётка
@@ -390,6 +424,14 @@ def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag=
     cls[thin] = NAVY
     # тёмно-синие пятна на ремне (генератор закрасил ремень тканью) - заливка ремнём
     cls[leather_ok & soft & (b > r)] = BAD
+    if 'soft_classes' in cfg:
+        # у SunChest вся латунь и медь - на деталях (hard); латунный или рыжий пиксель на ткани - царапина или пятно
+        allowed = [CLASS_NAMES.index(n) for n in cfg['soft_classes']]
+        cls[soft & (cls >= 0) & ~np.isin(cls, allowed)] = BAD
+    for cname, fp in (force_poly or {}).items():
+        # класс, заданный гранями (SunShoes: шнурки - серые и в тени, подошва - коричневая сбоку и чёрная снизу):
+        # по цвету тень шнурка - ткань, а подошва модели серо-оливковая
+        cls[soft & fp[pid]] = CLASS_NAMES.index(cname)
     cls, lum_f, n_bad, n_left = inpaint(cls, lum, soft)
     print(f'{tag} texture: {int(inside.sum())} px under the part (details {int(hard.sum())}), '
           f'repainted spots on cloth {n_bad} px, left {n_left}')
@@ -409,7 +451,7 @@ def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag=
         print(f'{tag}   {name}: {int(m.sum())} px ({m.sum() / inside.sum() * 100:.0f} %), model median luma {med:.3f}')
 
     # детали: кожа и серые размытые пятна (у панелей генератор закрасил ячейки серым) - заливка соседями
-    skin = (r - g > 0.07) & (g - b > 0.02) & (g - b < 0.16) & (lum > 0.42) & (r - b < 0.42)
+    skin = skin_mask(rgb, cfg)
     # серое пятно - крупное: тонкие светлые линии решётки панелей и наколенников остаются (открытие на 2 пикселя)
     # (у панели на ткани серое - полоса по шву, она остаётся)
     blob = opening((sat < 0.12) & (lum > 0.38) & hard & ~near_panel, 2)

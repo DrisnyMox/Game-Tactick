@@ -7,9 +7,9 @@ using UnityEngine;
 
 // Окно снаряжения в Play (сцена Base): каждый запуск снимает экран (что сделал прошлый шаг) в
 // Temp/EquipmentShots/<номер>_<шаг>.png и через кадр делает следующий шаг. Шаги: открыть окно (в профиль
-// добавляются зелёная туника, синие и оранжевые ботинки кочевника, надеваются зелёные штаны и фиолетовые перчатки
+// добавляются зелёная туника, синие и оранжевые кеды Культа Солнца, надеваются зелёные штаны и фиолетовые перчатки
 // базового набора), выбрать нагрудник, надеть тунику, выбрать
-// оранжевые ботинки, надеть их, выбрать шлем, закрыть окно. Последний запуск снимает игрока в мире и возвращает профиль, каким он был
+// оранжевые кеды, надеть их, выбрать шлем, закрыть окно. Последний запуск снимает игрока в мире и возвращает профиль, каким он был
 // до первого шага (ключ Profile.v1 копируется в PlayerPrefs и обратно).
 // Перед запуском: editor_play, editor_focus, set_autotick --enable true (CLAUDE.md, «Проверка после правки кода»).
 // Запускать с паузой в секунду-две между шагами: окно проявляется, камера персонажа доезжает.
@@ -67,8 +67,8 @@ public static class ProbeEquipment
                 PlayerPrefs.SetString(Backup, PlayerPrefs.GetString("Profile.v1", ""));
                 var gear = Profile.Current.gear;
                 gear.Add(new GearPiece { kind = GearKind.NomadChest, quality = GearQuality.Green });
-                gear.Add(new GearPiece { kind = GearKind.NomadBoots, quality = GearQuality.Blue });
-                gear.Add(new GearPiece { kind = GearKind.NomadBoots, quality = GearQuality.Orange });
+                gear.Add(new GearPiece { kind = GearKind.SunShoes, quality = GearQuality.Blue });
+                gear.Add(new GearPiece { kind = GearKind.SunShoes, quality = GearQuality.Orange });
                 // Скрафченный базовый набор в цвете: ремни штанов и манжета перчаток красятся по маске
                 var pants = new GearPiece { kind = GearKind.ClothPantsRope, quality = GearQuality.Green };
                 var gloves = new GearPiece { kind = GearKind.ClothGloves, quality = GearQuality.Purple };
@@ -88,7 +88,7 @@ public static class ProbeEquipment
                 break;
             case "feet":
                 Call(screen, "SelectSlot", GearSlot.Feet);
-                Call(screen, "SelectCard", GearKind.NomadBoots, GearQuality.Orange);
+                Call(screen, "SelectCard", GearKind.SunShoes, GearQuality.Orange);
                 break;
             case "wear_boots":
                 Call(screen, "WearSelected");

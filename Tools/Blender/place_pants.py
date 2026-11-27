@@ -86,7 +86,7 @@ PARTS = {
     # (part_005), пряжка (part_010), шнур с бусинами, провода, скобы. part_024..041 - кубики по 3 мм у низа штанин
     # (мусор выреза, под ботинком). Грани материала quality пользователь пометил под цвет качества (пояс, узел,
     # повязки, обмотки). Текстура чистится gear_texture.clean (texture)
-    'sun': dict(chests=('NomadChest', 'ClothChest'), boots=('NomadBoots', 'ClothBoots'), main=('part_001',),
+    'sun': dict(chests=('NomadChest', 'ClothChest'), boots=('SunShoes', 'NomadBoots', 'ClothBoots'), main=('part_001',),
                 wraps=(), knots=(), z_range=(0.10, 0.58), widen_top=0.65, max_widen=1.5, first_hit=True,
                 cap=0.145, ankle_top=0.18, mask='unseen', drop=tuple(f'part_{k:03d}' for k in range(24, 42)),
                 shell=dict(pieces=('part_001',), follow=('part_002', 'part_005', 'part_006', 'part_007', 'part_008',

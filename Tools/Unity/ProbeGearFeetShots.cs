@@ -79,8 +79,8 @@ public static class ProbeGearFeetShots
             root = shooter.transform;
             input = shooter.GetComponent<StarterAssetsInputs>();
             controller = shooter.GetComponent<ThirdPersonController>();
-            // надетые ботинки - ClothBoots или NomadBoots: на варианте стоят обе, включены одни
-            boots = root.Cast<Transform>().Single(t => t.name.EndsWith("Boots") && t.gameObject.activeSelf).GetComponent<SkinnedMeshRenderer>();
+            // надетая обувь - ClothBoots, NomadBoots или SunShoes: на варианте стоят все, включена одна
+            boots = root.Cast<Transform>().Single(t => (t.name.EndsWith("Boots") || t.name.EndsWith("Shoes")) && t.gameObject.activeSelf).GetComponent<SkinnedMeshRenderer>();
             bones = root.GetComponentsInChildren<Transform>(true).GroupBy(t => t.name).ToDictionary(g => g.Key, g => g.First());
             start = root.position;
             float yaw = Enumerable.Range(0, 24).Select(k => k * 15f).First(a => IsClear(Quaternion.Euler(0f, a, 0f) * root.forward));
@@ -148,7 +148,7 @@ public static class ProbeGearFeetShots
                     line.Append($" {side} земли нет;");
                 var target = bones[side + "Foot"].position;
                 target.y = (target.y + low.y) * 0.5f;
-                var outside = root.right * -sign;
+                var outside = root.right * sign;  // наружу от ноги: у левой -X (до 27.11.2026 знак был обратный, out и in менялись местами)
                 ShootAt($"{prefix}_{side}_out", target, outside, 0.75f);
                 ShootAt($"{prefix}_{side}_in", target, -outside, 0.75f);
                 ShootAt($"{prefix}_{side}_front", target, root.forward, 0.75f);
