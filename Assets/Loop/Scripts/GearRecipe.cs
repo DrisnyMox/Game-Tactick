@@ -24,5 +24,7 @@ public sealed class GearRecipe
         new() { result = GearKind.SunShoes, cost = new[] { (ItemId.Wood, 3), (ItemId.Scrap, 3), (ItemId.Tech, 1) } },
         // ткани мало, латунь - обруч с диском и лучи
         new() { result = GearKind.SunHead, cost = new[] { (ItemId.Wood, 2), (ItemId.Scrap, 4), (ItemId.Tech, 1) } },
+        // ткани больше, чем у кочевника, латунь - панель на тыльной стороне, бляха и кант
+        new() { result = GearKind.SunGloves, cost = new[] { (ItemId.Wood, 3), (ItemId.Scrap, 3), (ItemId.Tech, 1) } },
     };
 }

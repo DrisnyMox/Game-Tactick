@@ -293,6 +293,28 @@ def opening(m, n):
     return m
 
 
+def components(m):
+    """Связные (по 4 соседям) пятна маски m: список (строки, столбцы)."""
+    lab = np.zeros(m.shape, np.int32)
+    out = []
+    h, w = m.shape
+    for y0, x0 in zip(*np.nonzero(m)):
+        if lab[y0, x0]:
+            continue
+        lab[y0, x0] = len(out) + 1
+        stack, ys, xs = [(y0, x0)], [], []
+        while stack:
+            y, x = stack.pop()
+            ys.append(y)
+            xs.append(x)
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < h and 0 <= nx < w and m[ny, nx] and not lab[ny, nx]:
+                    lab[ny, nx] = len(out) + 1
+                    stack.append((ny, nx))
+        out.append((np.array(ys), np.array(xs)))
+    return out
+
+
 def enclosed(me, wall, max_area):
     """Грани, отрезанные от остальной сетки гранями wall, - связные куски площадью меньше max_area (окошко в рамке
     наколенника). Соседи - по общему ребру."""
@@ -412,12 +434,31 @@ def clean(me, co, poly_piece, quality_poly, base, normal, rough, size, cfg, tag=
     # Ремень под коленом - грани, где коричневого больше половины: тёмно-рыжий ореол вокруг латуни на ткани - не ремень
     leather_px = (r - b > 0.07) & (lum > 0.1) & (lum < 0.34) & ~brass_px
     leather_ok = (share(leather_px) > 0.5)[pid] & inside
+    leather_patch = None
+    if 'leather_thick' in cfg:
+        # кожаные накладки SunGloves на ладони и пальцах: край накладки идёт по рисунку, а не по граням (по граням
+        # накладка выходила зубчатой). Накладка - тёплые тёмные пиксели пятном толще 2 * leather_thick; тонкие рыжие
+        # линии по краям кусков и швам - не накладка, они становятся тканью
+        warm = (r - b > 0.03) & (lum > 0.05) & (lum < 0.4) & ~brass_px & inside & ~hard
+        leather_patch = opening(warm, cfg['leather_thick'])
+        # мелкие пятна (на пальцах со стороны ладони у модели рыжие крапины) - не накладки
+        sizes = []
+        for comp in components(leather_patch):
+            sizes.append(len(comp[0]))
+            if len(comp[0]) < cfg['leather_min_px']:
+                leather_patch[comp] = False
+        sizes.sort(reverse=True)
+        print(f'{tag} leather patches: {sum(1 for s in sizes if s >= cfg["leather_min_px"])} kept {sizes[:8]}, '
+              f'small dropped {sum(1 for s in sizes if s < cfg["leather_min_px"])}')
+        leather_ok = leather_patch
     grey_ok = inside & ~hard & ~quality
     if grey_poly is not None:
         grey_ok &= grey_poly[pid]
     cls = classify(rgb, quality, grey_ok, leather_ok, cfg)
     cls[~inside] = BAD
     soft = inside & ~hard
+    if leather_patch is not None:
+        cls[soft & leather_patch & (cls == NAVY)] = LEATHER
     # серое на ткани - только полосы толще 2 пикселей: светлые царапины на ткани уходят, а полосы по шву и решётка
     # окошек наколенников остаются (сглаживание класса по соседям стирало тонкую решётку)
     thin = soft & ~quality & (cls == GREY) & ~opening(soft & (cls == GREY), 1)

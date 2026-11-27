@@ -34,16 +34,17 @@ public static class SetupGear
     // На вариант ставятся все части из Folder: что надеть, в игре решает профиль (Gear.Dress, окно снаряжения
     // EquipmentScreen). ClothChest подгоняет fit_gear.py, ClothGloves вырезает из тела cut_gear.py, ClothBoots
     // NomadBoots и SunShoes ставит без смены формы place_gear.py, ClothPantsRope, NomadPants и SunPants - place_pants.py,
-    // NomadChest - place_chest.py, SunChest - place_chest_fitted.py, SunHead - place_head_fitted.py, NomadGloves -
-    // place_gloves.py: файлы у всех одинаковые. Parts - части, включённые в префабе: так игрок одет в сценах без профиля
+    // NomadChest - place_chest.py, SunChest - place_chest_fitted.py, SunHead - place_head_fitted.py, NomadGloves
+    // и SunGloves - place_gloves.py: файлы у всех одинаковые. Parts - части, включённые в префабе: так игрок одет в сценах без профиля
     // (SampleScene, SurvivorPlayground) и в пробах снаряжения; остальные стоят выключенными
-    static readonly string[] Parts = { "SunHead", "SunChest", "NomadGloves", "SunShoes", "SunPants" };
+    static readonly string[] Parts = { "SunHead", "SunChest", "SunGloves", "SunShoes", "SunPants" };
     // Части из одного слоя ткани с открытыми краями: у NomadChest между поясом-обмоткой и подолом, у горловины
     // и под накидкой видна изнанка, у NomadPants - внутри широкой штанины шорт и с изнанки лент обмоток, у NomadGloves -
     // в отверстиях для пальцев и в манжете, у SunPants - внутри пояса сверху, у SunChest - в проймах, в разрезе подола
-    // спереди и под наплечником, у SunHead - снизу под колпаком (полоса через макушку - один слой). С одной стороной
-    // граней в эти щели был виден фон (тело под частью спрятано)
-    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves", "SunPants", "SunChest", "SunHead" };
+    // спереди и под наплечником, у SunHead - снизу под колпаком (полоса через макушку - один слой), у SunGloves -
+    // в манжету у локтя. С одной стороной граней в эти щели был виден фон (тело под частью спрятано)
+    static readonly string[] DoubleSided = { "NomadChest", "NomadPants", "NomadGloves", "SunPants", "SunChest", "SunHead",
+        "SunGloves" };
 
     // Заполняет JsonUtility
 #pragma warning disable CS0649
@@ -98,7 +99,7 @@ public static class SetupGear
             importer.SaveAndReimport();
 
             var source = AssetDatabase.LoadAssetAtPath<GameObject>(modelPath).GetComponentInChildren<SkinnedMeshRenderer>();
-            CheckBindposes(source, bodyModelSmr);
+            CheckBindposes(source, bodyModelSmr, log);
 
             var piece = root.transform.Find(part);
             if (piece == null)
@@ -152,24 +153,50 @@ public static class SetupGear
     }
 
     // Кости части привязываются к скелету тела по именам, поэтому позы покоя должны совпасть. Проверяются кости
-    // с весами части: концевые кости пальцев Blender при импорте поворачивает по-своему, но часть они не двигают
-    static void CheckBindposes(SkinnedMeshRenderer part, SkinnedMeshRenderer body)
+    // с весами части. Концевые кости пальцев Blender при импорте поворачивает по-своему: части без пальцев (NomadGloves)
+    // их не задевают, у SunGloves на них кончики пальцев - сдвиг мерится и допускается до MaxBindShift
+    static void CheckBindposes(SkinnedMeshRenderer part, SkinnedMeshRenderer body, StringBuilder log)
     {
         var bodyBind = body.bones.Select((b, i) => (b.name, body.sharedMesh.bindposes[i])).ToDictionary(x => x.name, x => x.Item2);
         var used = new HashSet<int>(part.sharedMesh.boneWeights.SelectMany(w => new[]
         {
             (w.boneIndex0, w.weight0), (w.boneIndex1, w.weight1), (w.boneIndex2, w.weight2), (w.boneIndex3, w.weight3),
         }).Where(x => x.Item2 > 0f).Select(x => x.Item1));
+        var mesh = part.sharedMesh;
+        var verts = mesh.vertices;
+        var weights = mesh.boneWeights;
         foreach (int i in used)
         {
-            var a = part.sharedMesh.bindposes[i];
+            var a = mesh.bindposes[i];
             var b = bodyBind[part.bones[i].name];
+            bool same = true;
             for (int k = 0; k < 16; k++)
-                if (Mathf.Abs(a[k] - b[k]) > 1e-4f)
-                    throw new System.InvalidOperationException(
-                        $"{part.sharedMesh.name}: поза покоя кости {part.bones[i].name} не как у тела ({a[k]} и {b[k]})");
+                same &= Mathf.Abs(a[k] - b[k]) <= 1e-4f;
+            if (same)
+                continue;
+            // Вершина части в позе покоя в игре: кость тела (b) с позой покоя части (a) - b^-1 * a * v. Сдвиг от места
+            // в FBX - ошибка позы покоя. Концевые фаланги пальцев (SunGloves закрывает пальцы целиком) Blender
+            // поворачивает по-своему на несколько градусов: допускается, если сдвиг меньше MaxBindShift
+            var err = b.inverse * a;
+            float shift = 0f;
+            for (int v = 0; v < verts.Length; v++)
+            {
+                var w = weights[v];
+                float wi = (w.boneIndex0 == i ? w.weight0 : 0f) + (w.boneIndex1 == i ? w.weight1 : 0f) +
+                           (w.boneIndex2 == i ? w.weight2 : 0f) + (w.boneIndex3 == i ? w.weight3 : 0f);
+                if (wi > 0f)
+                    shift = Mathf.Max(shift, wi * (err.MultiplyPoint3x4(verts[v]) - verts[v]).magnitude);
+            }
+            if (!part.bones[i].name.EndsWith("Distal") || shift > MaxBindShift)
+                throw new System.InvalidOperationException(
+                    $"{mesh.name}: поза покоя кости {part.bones[i].name} не как у тела, сдвиг вершин до {shift * 1000f:F2} мм");
+            log.AppendLine($"{mesh.name}: поза покоя {part.bones[i].name} повёрнута на " +
+                           $"{Quaternion.Angle(a.rotation, b.rotation):F1}° от тела, сдвиг вершин до {shift * 1000f:F2} мм");
         }
     }
+
+    // Допустимый сдвиг вершин части от ошибки позы покоя концевой фаланги, в единицах Unity (рост тела около 1,8)
+    const float MaxBindShift = 0.002f;
 
     // Вершины тела под частью (номера в меше тела). Треугольники прячет WornGear по всем надетым частям вместе:
     // треугольник кожи у щиколотки (4 см) одной вершиной под штанами, другой под кедами - по отдельности его не

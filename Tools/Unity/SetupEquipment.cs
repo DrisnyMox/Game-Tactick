@@ -153,6 +153,8 @@ public static class SetupEquipment
     static (float pitch, float yaw, bool oneSide) View(GearKind kind) => kind switch
     {
         GearKind.ClothGloves or GearKind.NomadGloves => (12f, -35f, true),
+        // сверху сбоку: видны панель на тыльной стороне и обмотка, а не раструб манжеты изнутри
+        GearKind.SunGloves => (40f, -70f, true),
         GearKind.ClothBoots or GearKind.NomadBoots or GearKind.SunShoes => (16f, -38f, true),
         GearKind.ClothPantsRope or GearKind.NomadPants or GearKind.SunPants => (6f, -22f, false),
         // сверху сбоку: видны лучи над обручем и полоса через макушку
@@ -434,12 +436,13 @@ public static class SetupEquipment
         for (int i = 0; i < slots.Length; i++)
             slots[i] = BuildSlot(slotColumn, (GearSlot)i);
 
-        // все пять слотов в цвете - четыре строки: место до подписи «I или Esc» внизу
+        // все пять слотов в цвете - пять строк (с перчатками Культа Солнца): подпись «I или Esc» справа внизу, под
+        // карточкой, слева строка наезжала на неё
         var riskSummary = Label("Risk Summary", window, body, "", 20, Risk, TextAnchor.UpperLeft);
-        Place(riskSummary.rectTransform, new Vector2(0f, 1f), new Vector2(98f, -876f), new Vector2(436f, 120f));
+        Place(riskSummary.rectTransform, new Vector2(0f, 1f), new Vector2(98f, -876f), new Vector2(436f, 160f));
         riskSummary.horizontalOverflow = HorizontalWrapMode.Wrap;
-        var footer = Label("Footer", window, body, "I  или  Esc  —  закрыть", 22, Muted, TextAnchor.LowerLeft);
-        Place(footer.rectTransform, new Vector2(0f, 0f), new Vector2(98f, 44f), new Vector2(600f, 30f));
+        var footer = Label("Footer", window, body, "I  или  Esc  —  закрыть", 22, Muted, TextAnchor.LowerRight);
+        Place(footer.rectTransform, new Vector2(1f, 0f), new Vector2(-98f, 44f), new Vector2(600f, 30f), new Vector2(1f, 0f));
 
         // Середина окна: игрок виден сквозь неё, прозрачная плашка ловит перетаскивание и колесо
         var previewImage = NewImage("Preview", window, new Color(0f, 0f, 0f, 0f), null);

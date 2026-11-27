@@ -1,7 +1,10 @@
 """
 Ставит перчатки, подогнанные пользователем под тело игрока Assets/Models/20261121003938_8b8745d5.fbx, на его скелет.
 Пользователь вырезал перчатки из модели генератора персонажа в них (3ds Max) и подогнал под базовое тело только
-правую. Левая - отражение правой по плоскости симметрии тела: тело в кистях и предплечьях симметрично (проверяется).
+одну (NomadGloves - правую, SunGloves - левую). Вторая - отражение по плоскости симметрии тела: тело в кистях
+и предплечьях симметрично (проверяется). У SunGloves ещё: подгонка только в вершинах (object_matrix), сварка
+отрезанных треугольников (weld), пометка под цвет качества материалом (quality_material, маска по граням),
+чистка текстуры gear_texture.clean (texture; --texture-only --png - только снимки до и после), гладкость по классу.
 
 Запуск (из корня проекта):
     "E:\\Software\\Blender\\blender.exe" --background --factory-startup --python Tools/Blender/place_gloves.py -- ^
@@ -42,15 +45,37 @@ from mathutils.kdtree import KDTree
 
 sys.dont_write_bytecode = True  # без __pycache__ в Tools/Blender
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import gear_texture  # noqa: E402
 from gear_fit import (add_covered, average, covered_triangles, nearest_skin, neighbours,  # noqa: E402
                       push_faces_off_skin, seen_from_outside, sphere_dirs, world_bm)
 from gear_poses import POSES, RECORDED, SKIN_BONES, limit_bones, set_pose  # noqa: E402
 
 BODY_PATH = 'Assets/Models/20261121003938_8b8745d5.fbx'
 
-# side - сторона подогнанной перчатки; frame - из сцены Max (координаты объекта с его матрицей) в координаты тела
+# side - сторона подогнанной перчатки; frame - из сцены Max (координаты объекта с его матрицей) в координаты тела.
+# object_matrix False - подгонка пользователя только в вершинах, матрица объекта (масштаб 6,45 и поворот осей Max)
+# отбрасывается, как у SunChest и SunHead; frame тогда - только Y вверх -> Z вверх
 PARTS = {
     'nomad': dict(side='Right', frame=Matrix.Diagonal((-1 / 2.54, -1 / 2.54, 1 / 2.54, 1))),
+    # Культ Солнца: тёмно-синяя ткань с тиснёным узором, серая обмотка на манжете (пометка '01 - Default'), латунный
+    # кант, кожаные накладки на ладони, латунная бляха на ладони, латунная панель на тыльной стороне. В FBX
+    # подогнана левая; 18 треугольников у кнопки на запястье отделены от перчатки (вершины разрезаны) - weld
+    'sun': dict(side='Left', frame=Matrix.Rotation(math.radians(90), 4, 'X'), object_matrix=False, weld=True,
+                quality_material='01 - Default', stray_faces=10, texture_size=1024,
+                smoothness=dict(fabric=0.2, leather=0.3, brass=0.45),
+                texture=dict(
+                    # медианы по картинкам генератора SunGloves_front.webp и SunGloves_back.webp (sRGB): ткань светлее
+                    # и синее, чем у штанов и нагрудника; латунь - как у комплекта
+                    palette=dict(fabric=(0.245, 0.25, 0.305), grey=(0.66, 0.64, 0.62), brass=(0.62, 0.49, 0.33),
+                                 leather=(0.27, 0.215, 0.195), copper=(0.72, 0.36, 0.16), sun=(0.33, 0.35, 0.42)),
+                    # тиснёный узор ткани (ромбы, круги) - рисунок модели: яркость ткани не сглаживается
+                    shade=dict(fabric=(0.0, 0.7, 1.3), grey=(0.8, 0.5, 1.35), brass=(0.8, 0.5, 1.4),
+                               leather=(0.6, 0.6, 1.3), copper=(0.5, 0.5, 1.4)),
+                    soft_classes=('fabric', 'leather', 'brass', 'grey'), leather_thick=4, leather_min_px=1500,
+                    hard=(),  # заполняется ниже: все куски, кроме перчатки (панель на тыльной стороне)
+                    panel=(), fabric_pieces=('p00',),
+                    brass_share=0.25, window_area=0.003, behind_reach=0.03, sun_clear=0.02,
+                    sun_radius=0.01, sun_spacing=0.03, sun_alpha=0.0)),
 }
 GAP = 0.001         # вершина перчатки не ближе к коже, м (рост тела 1,088; в Unity умножается на 1,662)
 FACE_GAP = 0.0005   # точка внутри грани не ближе к коже
@@ -69,12 +94,16 @@ parser.add_argument('--part', required=True, choices=sorted(PARTS))
 parser.add_argument('--src', required=True)
 parser.add_argument('--out', required=True)
 parser.add_argument('--png', default='')
+parser.add_argument('--texture-only', action='store_true')  # только снимки текстуры до и после чистки
 args = parser.parse_args(argv)
 cfg = PARTS[args.part]
 src, out = os.path.abspath(args.src), os.path.abspath(args.out)
 stem = os.path.splitext(out)[0]
 name = os.path.basename(stem)
 sgn = 1.0 if cfg['side'] == 'Left' else -1.0  # знак X подогнанной стороны: левая сторона персонажа на +X
+TEXTURE_SIZE = cfg.get('texture_size', TEXTURE_SIZE)
+if args.png:
+    os.makedirs(args.png, exist_ok=True)
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
@@ -122,7 +151,7 @@ for o in new:
         bpy.data.objects.remove(o)
 for o in meshes:
     o.parent = None
-    o.data.transform(cfg['frame'] @ o.matrix_world)
+    o.data.transform(cfg['frame'] @ o.matrix_world if cfg.get('object_matrix', True) else cfg['frame'])
     o.matrix_world = Matrix.Identity(4)
 bpy.ops.object.select_all(action='DESELECT')
 for o in meshes:
@@ -160,11 +189,119 @@ for piece in pieces:
     print(f'[Gloves] piece {len(piece)} verts, x {min(xs):.3f}..{max(xs):.3f}')
 keep = {v.index for piece in pieces if np.mean([v.co.x for v in piece]) * sgn > 0 for v in piece}
 bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.index not in keep], context='VERTS')
+if cfg.get('weld'):
+    # SunGloves: 18 треугольников у кнопки на запястье лежат на месте в перчатке, но их вершины разрезаны (в
+    # неподогнанном FBX они - часть сетки): без сварки отодвигание от кожи и веса двигали бы их отдельно, и шов
+    # освещался бы гранями. Сваривается только совпадающее до 0,01 мм - форма та же
+    # Только вершины отдельных треугольников - к совпадающим вершинам остальной сетки (сварка всего подряд
+    # склеила бы и совпадающие вершины соседних пальцев)
+    bm.verts.ensure_lookup_table()
+    seen_w, loose = set(), []
+    for v in bm.verts:
+        if v.index in seen_w:
+            continue
+        stack, comp = [v], []
+        seen_w.add(v.index)
+        while stack:
+            a = stack.pop()
+            comp.append(a)
+            for e in a.link_edges:
+                b = e.other_vert(a)
+                if b.index not in seen_w:
+                    seen_w.add(b.index)
+                    stack.append(b)
+        if len(comp) == 3:
+            loose += comp
+    loose_set = set(loose)
+    kd_w = KDTree(len(bm.verts))
+    for v in bm.verts:
+        if v not in loose_set:
+            kd_w.insert(v.co, v.index)
+    kd_w.balance()
+    targets = {}
+    for v in loose:
+        _, j, dist = kd_w.find(v.co)
+        if dist < 0.00001:
+            targets[v] = bm.verts[j]
+    bmesh.ops.weld_verts(bm, targetmap=targets)
+    # вокруг них в сетке разрез: совпадающие вершины на открытых рёбрах (не края манжеты и не пальцы - те замкнуты)
+    n0 = len(bm.verts)
+    rim = list({v for e in bm.edges if len(e.link_faces) == 1 for v in e.verts})
+    bmesh.ops.remove_doubles(bm, verts=rim, dist=0.00001)
+    print(f'[Gloves] loose triangles {len(loose) // 3}: welded {len(targets)} of {len(loose)} verts; '
+          f'crack around them closed: {n0 - len(bm.verts)} verts')
 open_edges = sum(1 for e in bm.edges if len(e.link_faces) == 1)
 bm.to_mesh(me)
 bm.free()
 me.update()
 print(f'[Gloves] {cfg["side"]} glove: {len(me.vertices)} verts, {len(me.polygons)} faces, open edges {open_edges}')
+
+# Куски по связности: p00 - перчатка, дальше по числу вершин (как в place_head_fitted.py)
+bm = bmesh.new()
+bm.from_mesh(me)
+bm.verts.ensure_lookup_table()
+lab = np.full(len(bm.verts), -1)
+comps = []
+for v in bm.verts:
+    if lab[v.index] >= 0:
+        continue
+    stack, comp = [v], []
+    lab[v.index] = len(comps)
+    while stack:
+        a = stack.pop()
+        comp.append(a.index)
+        for e in a.link_edges:
+            b = e.other_vert(a)
+            if lab[b.index] < 0:
+                lab[b.index] = len(comps)
+                stack.append(b)
+    comps.append(comp)
+bm.free()
+rank = {k: r for r, k in enumerate(sorted(range(len(comps)), key=lambda k: (-len(comps[k]), min(comps[k]))))}
+piece_names = [f'p{k:02d}' for k in range(len(comps))]
+poly_piece = np.array(piece_names)[[rank[lab[p.vertices[0]]] for p in me.polygons]]
+for k in range(len(comps)):
+    print(f'[Gloves] piece p{k:02d}: {int((poly_piece == piece_names[k]).sum())} faces')
+
+# Пометка пользователя под цвет качества (материал quality_material): отдельные мелкие куски пометки (меньше
+# stray_faces граней, не касаются основной) - промах выделения, снимаются. Слот 1 - пометка, до отражения и экспорта
+quality_poly = np.zeros(len(me.polygons), bool)
+if 'quality_material' in cfg:
+    mat_names = [m.name if m else '' for m in me.materials]
+    quality_poly = np.array([mat_names[p.material_index].split('.')[0] == cfg['quality_material'] for p in me.polygons])
+    faces_of_edge = {}
+    for p in me.polygons:
+        for ek in p.edge_keys:
+            faces_of_edge.setdefault(ek, []).append(p.index)
+    seen_f = set()
+    for f0 in np.flatnonzero(quality_poly):
+        if f0 in seen_f:
+            continue
+        stack, grp = [int(f0)], []
+        seen_f.add(int(f0))
+        while stack:
+            a = stack.pop()
+            grp.append(a)
+            for ek in me.polygons[a].edge_keys:
+                for b in faces_of_edge[ek]:
+                    if quality_poly[b] and b not in seen_f:
+                        seen_f.add(b)
+                        stack.append(b)
+        if len(grp) < cfg['stray_faces']:
+            c = me.polygons[grp[0]].center
+            print(f'[Gloves] marked faces apart from the rest: {len(grp)} at ({c.x * 1000:.0f} {c.y * 1000:.0f} '
+                  f'{c.z * 1000:.0f}) mm - unmarked')
+            quality_poly[grp] = False
+    print(f'[Gloves] materials {mat_names}; quality faces {int(quality_poly.sum())} of {len(me.polygons)}')
+    tex_slot = next(i for i, m in enumerate(me.materials)
+                    if m and m.node_tree and any(n.type == 'TEX_IMAGE' for n in m.node_tree.nodes))
+    # пометка идёт в маску цвета качества, материал один (иначе в Unity вторая часть меша без текстуры). Маска
+    # считается по развёртке одной перчатки: отражение - копия с той же развёрткой
+    for k in reversed(range(len(me.materials))):
+        if k != tex_slot:
+            me.materials.pop(index=k)
+    me.polygons.foreach_set('material_index', np.zeros(len(me.polygons), np.int32))
+    me.update()
 
 
 # ----------------------------------------------------------------------------------------------
@@ -253,9 +390,51 @@ def bleed(img, good, steps):
 
 
 tex_nodes = {n.image.name: n for n in me.materials[0].node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
-kinds = {'base': next(k for k in tex_nodes if not any(s in k for s in ('normal', 'roughness', 'metallic'))),
-         'normal': next(k for k in tex_nodes if 'normal' in k),
-         'roughness': next(k for k in tex_nodes if 'roughness' in k)}
+kinds = {'base': next(k for k in tex_nodes if not any(s in k for s in ('normal', 'roughness', 'metallic')))}
+if 'texture' not in cfg:
+    kinds.update(normal=next(k for k in tex_nodes if 'normal' in k), roughness=next(k for k in tex_nodes if 'roughness' in k))
+TEX_VIEWS = {'top': (0, 0.001, 1), 'palm': (0, 0.001, -1), 'front': (0, -1, 0), 'back': (0, 1, 0),
+             'persp': (0.35 * sgn, -0.6, 0.7), 'cuff': (-0.5 * sgn, -0.6, 0.6)}
+
+
+def texture_shots(prefix):
+    """Перчатка без тела с текстурой при ровном свете (цвет текстуры как есть): тыльная сторона, ладонь, сбоку."""
+    scene = bpy.context.scene
+    scene.render.engine = 'BLENDER_WORKBENCH'
+    scene.display.shading.light = 'FLAT'
+    scene.display.shading.color_type = 'TEXTURE'
+    scene.render.resolution_x, scene.render.resolution_y = 1000, 560
+    if 'TexCam' not in bpy.data.objects:
+        world = bpy.data.worlds.new('TexWorld')
+        world.color = (0.75, 0.75, 0.75)
+        scene.world = world
+        cam_ = bpy.data.objects.new('TexCam', bpy.data.cameras.new('TexCam'))
+        scene.collection.objects.link(cam_)
+        cam_.data.type = 'ORTHO'
+        cam_.data.ortho_scale = 0.28
+        cam_.data.clip_start = 0.001
+    cam_ = bpy.data.objects['TexCam']
+    scene.camera = cam_
+    body.hide_render = True
+    pts = mesh_co()
+    c = Vector(pts.mean(0))
+    for view, dv in TEX_VIEWS.items():
+        dv = Vector(dv).normalized()
+        cam_.location = c + dv * 2
+        cam_.rotation_euler = (-dv).to_track_quat('-Z', 'Y').to_euler()
+        scene.render.filepath = os.path.join(os.path.abspath(args.png), f'{prefix}_{view}.png')
+        bpy.ops.render.render(write_still=True)
+    body.hide_render = False
+
+
+def mesh_co():
+    a = np.empty(len(me.vertices) * 3)
+    me.vertices.foreach_get('co', a)
+    return a.reshape(-1, 3)
+
+
+if args.png and 'texture' in cfg:
+    texture_shots('tex_model')  # исходная развёртка, текстура 4096
 baked, face_of = rebake(me, [image_array(tex_nodes[kinds[k]].image) for k in kinds], TEXTURE_SIZE)
 baked = dict(zip(kinds, baked))
 
@@ -307,14 +486,55 @@ def clean_colors(img, face_of):
     img.reshape(-1, 4)[:, :3] = np.clip(out, 0, 1)
 
 
-clean_colors(baked['base'], face_of)
-for k in kinds:
-    bleed(baked[k], face_of >= 0, BLEED)
-for k, name_ in kinds.items():
-    # снимки --png рисуют новую развёртку с новой картинкой
-    img = bpy.data.images.new(f'{name}_{k}', TEXTURE_SIZE, TEXTURE_SIZE, alpha=True)
-    img.pixels.foreach_set(baked[k].ravel())
-    tex_nodes[name_].image = img
+def show_texture(a, tag):
+    img = bpy.data.images.new(f'{name}_{tag}', TEXTURE_SIZE, TEXTURE_SIZE, alpha=True)
+    img.pixels.foreach_set(a.ravel())
+    tex_nodes[kinds['base']].image = img
+
+
+smooth_map = None
+quality_tex = None
+if 'texture' in cfg:
+    # Чистка gear_texture.clean, как у SunPants, SunChest, SunHead: кожа и пятна заливаются соседями, ткань, обмотка,
+    # кожа ладони и латунь - в цвета картинок генератора, яркость (складки, тиснёный узор) остаётся
+    S_ = TEXTURE_SIZE
+    if args.png:
+        show_texture(baked['base'], 'own_uv')
+        texture_shots('tex_before')
+    tcfg = dict(cfg['texture'], hard=tuple(n for n in piece_names if n not in cfg['texture']['fabric_pieces']))
+    flat_normal = np.zeros((S_, S_, 4), np.float32)
+    flat_normal[...] = (0.5, 0.5, 1.0, 1.0)
+    rough = np.full((S_, S_, 4), 0.8, np.float32)
+    rough[..., 3] = 1.0
+    # серое без пометки - только на обмотке (пометка): белёсые пятна на пальцах - мусор генератора
+    cleaned, _, _ = gear_texture.clean(me, mesh_co(), poly_piece, quality_poly, baked['base'], flat_normal, rough, S_,
+                                       tcfg, tag='[Gloves]', grey_poly=np.zeros(len(me.polygons), bool))
+    cls = gear_texture.DEBUG['cls']
+    inside_ = gear_texture.DEBUG['inside']
+    hard_ = gear_texture.DEBUG['hard']
+    sm = cfg['smoothness']
+    smooth_map = np.full((S_, S_), sm['fabric'], np.float32)
+    smooth_map[inside_ & (cls == gear_texture.LEATHER)] = sm['leather']
+    smooth_map[inside_ & (hard_ & gear_texture.brass_mask(cleaned[..., :3], tcfg, lum_min=True) |
+                          (cls == gear_texture.BRASS))] = sm['brass']
+    smooth_map = gear_texture.bleed(smooth_map[..., None].repeat(3, -1), inside_, BLEED)[..., 0]
+    quality_tex = gear_texture.face_mask(me, quality_poly, S_)
+    baked = {'base': cleaned, 'normal': flat_normal}
+    show_texture(cleaned, 'clean')
+    if args.png:
+        texture_shots('tex_after')
+    if args.texture_only:
+        print('[Gloves] texture only: done')
+        sys.exit(0)
+else:
+    clean_colors(baked['base'], face_of)
+    for k in kinds:
+        bleed(baked[k], face_of >= 0, BLEED)
+    for k, name_ in kinds.items():
+        # снимки --png рисуют новую развёртку с новой картинкой
+        img = bpy.data.images.new(f'{name}_{k}', TEXTURE_SIZE, TEXTURE_SIZE, alpha=True)
+        img.pixels.foreach_set(baked[k].ravel())
+        tex_nodes[name_].image = img
 
 
 def skin_gaps(co):
@@ -347,12 +567,6 @@ def push_off(co, edges, passes=4):
             need = 0.5 * need + 0.5 * average(need, nb)
         co += normals * need[:, None]
         print(f'[Gloves] pass {it + 1}: closer to the skin than {GAP * 1000:.1f} mm up to {worst * 1000:.1f} mm')
-
-
-def mesh_co():
-    a = np.empty(len(me.vertices) * 3)
-    me.vertices.foreach_get('co', a)
-    return a.reshape(-1, 3)
 
 
 def set_co(co):
@@ -389,6 +603,28 @@ print(f'[Gloves] moved off the skin: {int((moved > 1e-5).sum())} verts, up to {m
 set_co(co)
 report(co, 'placed')
 
+
+def skin_outside(co):
+    """Кожа рук снаружи перчатки: луч от кожи внутрь находит перчатку (не дальше 20 мм) раньше, чем наружу."""
+    me.calc_loop_triangles()
+    tree = BVHTree.FromPolygons([Vector(p) for p in co], [tuple(t.vertices) for t in me.loop_triangles])
+    found = []
+    for i, p in enumerate(body_rest):
+        if abs(p[0] - plane_x) < ARM_FROM:
+            continue
+        n = Vector(body_normal[i])
+        hin = tree.ray_cast(Vector(p), -n, 0.02)
+        hout = tree.ray_cast(Vector(p), n, 0.1)
+        if hin[0] is not None and (hout[0] is None or hin[3] < hout[3]):
+            found.append((hin[3], i))
+    found.sort(reverse=True)
+    print(f'[Gloves] skin outside the gloves: {len(found)} verts' +
+          ''.join(f'\n[Gloves]     {main_bone[i]} ({body_rest[i][0] * 1000:.0f} {body_rest[i][1] * 1000:.0f} '
+                  f'{body_rest[i][2] * 1000:.0f}) {d * 1000:.1f} mm' for d, i in found[:12]))
+
+
+skin_outside(co)
+
 # ----------------------------------------------------------------------------------------------
 # Веса с тела
 # ----------------------------------------------------------------------------------------------
@@ -414,6 +650,24 @@ used = {glove.vertex_groups[g.group].name for v in me.vertices for g in v.groups
 if bad or max(len(v.groups) for v in me.vertices) > SKIN_BONES:
     raise RuntimeError(f'{name}: bad weights ({len(bad)} vertices without bones)')
 print(f'[Gloves] bones: {sorted(used)}')
+# Палец перчатки должен идти за своим пальцем тела: ребро перчатки между вершинами, у которых главная кость - разные
+# пальцы дальше основной фаланги, значит палец перчатки лёг между пальцами тела и порвётся, когда пальцы сожмутся
+FINGERS = ('Thumb', 'Index', 'Middle', 'Ring', 'Little')
+vmain = [glove.vertex_groups[max(v.groups, key=lambda g: g.weight).group].name for v in me.vertices]
+vfinger = [next((f for f in FINGERS if f in n and 'Proximal' not in n), None) for n in vmain]
+cross = [e for e in me.edges if vfinger[e.vertices[0]] and vfinger[e.vertices[1]] and
+         vfinger[e.vertices[0]] != vfinger[e.vertices[1]]]
+print(f'[Gloves] edges between different fingers (beyond the proximal phalanx): {len(cross)}')
+pairs = {}
+for e in cross:
+    a, b = e.vertices
+    k = tuple(sorted((vmain[a], vmain[b])))
+    p = (me.vertices[a].co + me.vertices[b].co) / 2
+    pairs.setdefault(k, []).append(tuple(p))
+for k, ps in sorted(pairs.items(), key=lambda t: -len(t[1]))[:12]:
+    P = np.array(ps)
+    print(f'[Gloves]   {k[0]} - {k[1]}: {len(ps)} edges at x {P[:, 0].min() * 1000:.0f}..{P[:, 0].max() * 1000:.0f} '
+          f'y {P[:, 1].min() * 1000:.0f}..{P[:, 1].max() * 1000:.0f} z {P[:, 2].min() * 1000:.0f}..{P[:, 2].max() * 1000:.0f}')
 glove.parent = arm_obj
 mod = glove.modifiers.new('Armature', 'ARMATURE')
 mod.object = arm_obj
@@ -545,8 +799,12 @@ def save(a, file_name, colorspace):
 save(baked['base'], f'{name}.png', 'sRGB')
 save(baked['normal'], f'{name}_normal.png', 'Non-Color')
 ms = np.zeros((TEXTURE_SIZE * TEXTURE_SIZE, 4), np.float32)  # металла нет
-ms[:, 3] = 1.0 - baked['roughness'].reshape(-1, 4)[:, 0]
+# гладкость: у NomadGloves - из карты шероховатости модели, у SunGloves её нет - по классу пикселя
+ms[:, 3] = smooth_map.ravel() if smooth_map is not None else 1.0 - baked['roughness'].reshape(-1, 4)[:, 0]
 save(ms, f'{name}_metallic_smoothness.png', 'Non-Color')
+if quality_tex is not None:
+    save((np.repeat(quality_tex.reshape(-1, 1), 4, 1) * [1, 1, 1, 0] + [0, 0, 0, 1]).astype(np.float32),
+         f'{name}_quality.png', 'Non-Color')
 
 bpy.data.objects.remove(body)
 glove.matrix_world = Matrix.Identity(4)
