@@ -14,4 +14,5 @@ public enum GearKind
     SunPants = 8,
     SunChest = 9,
     SunShoes = 10,
+    SunHead = 11,
 }

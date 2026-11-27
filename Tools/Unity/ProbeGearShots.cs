@@ -5,9 +5,9 @@ using UnityEngine;
 
 // Снимки надетого снаряжения вблизи в Play (сцена SurvivorPlayground): числам замера одним верить нельзя,
 // вид проверяется глазами. Временные камеры ставятся вокруг кистей игрока (спереди, сзади, сбоку, сверху,
-// снизу) и вокруг всего игрока, плюс кадр камеры игры. Снимки - в Temp/GearShots/<режим>_*.png.
-// Первый запуск снимает игрока как он стоит и включает прицел (SurvivorShooter.AimInput), второй (через
-// секунду-две) - в прицеле, с винтовкой в руках, и выключает прицел.
+// снизу), вокруг всего игрока, вокруг головы (головной убор), плюс кадр камеры игры. Снимки - в
+// Temp/GearShots/<режим>_*.png. Первый запуск снимает игрока как он стоит и включает прицел
+// (SurvivorShooter.AimInput), второй (через секунду-две) - в прицеле, с винтовкой в руках, и выключает прицел.
 // Перед запуском: editor_play, editor_focus, set_autotick --enable true (CLAUDE.md, «Проверка после правки кода»).
 // Запуск: unity command run_script --file Tools/Unity/ProbeGearShots.cs
 public static class ProbeGearShots
@@ -39,6 +39,10 @@ public static class ProbeGearShots
         var chest = bones["Chest"].position;
         foreach (var (name, dir) in Directions(root).Take(4))
             Shoot($"{mode}_body_{name}", chest, dir, 2.2f, 40f, ref count);
+        // голова вблизи: головной убор (SunHead) - кожа и уши у края, клапан на затылке
+        var head = bones["Head"].position + Vector3.up * 0.08f;
+        foreach (var (name, dir) in Directions(root))
+            Shoot($"{mode}_head_{name}", head, dir, 0.9f, 25f, ref count);
         Shoot(Camera.main, $"{mode}_game", ref count);
         shooter.AimInput = !aim;
         SessionState.SetBool(AimKey, !aim);

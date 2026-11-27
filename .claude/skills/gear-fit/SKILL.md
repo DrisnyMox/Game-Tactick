@@ -28,6 +28,7 @@ description: Посадка надеваемой части снаряжения
    Места под цвет качества, помеченные пользователем отдельным материалом, — `quality_material` (маска по граням);
    грязная текстура модели — `texture` (чистка `gear_texture.py`, снимки до и после показать до посадки, как у `SunPants`).
    Свисающие куски (ленточки узла) — `hips_only` и `hanging`, как у `SunPants`.
+   Головной убор, подогнанный пользователем, — `place_head_fitted.py` (запись в `PARTS`, как `sun_head`).
 3. **Запуск с `--png`** в Blender (`E:\Software\Blender\blender.exe --background --factory-startup --python ...`,
    системного Python нет). Что делается по шагам `gear_fit.py`:
    - `split_long_edges` — рёбра ткани длиннее `split` делятся: крупные грани не прогнутся по телу;

@@ -22,5 +22,7 @@ public sealed class GearRecipe
         new() { result = GearKind.SunChest, cost = new[] { (ItemId.Wood, 4), (ItemId.Scrap, 6), (ItemId.Tech, 3) } },
         // латуни меньше, чем у штанов: накладки на носке и одно солнце с панелью
         new() { result = GearKind.SunShoes, cost = new[] { (ItemId.Wood, 3), (ItemId.Scrap, 3), (ItemId.Tech, 1) } },
+        // ткани мало, латунь - обруч с диском и лучи
+        new() { result = GearKind.SunHead, cost = new[] { (ItemId.Wood, 2), (ItemId.Scrap, 4), (ItemId.Tech, 1) } },
     };
 }

@@ -7,9 +7,9 @@ using UnityEngine;
 
 // Окно снаряжения в Play (сцена Base): каждый запуск снимает экран (что сделал прошлый шаг) в
 // Temp/EquipmentShots/<номер>_<шаг>.png и через кадр делает следующий шаг. Шаги: открыть окно (в профиль
-// добавляются зелёная туника, синие и оранжевые кеды Культа Солнца, надеваются зелёные штаны и фиолетовые перчатки
+// добавляются зелёная туника, синие и оранжевые кеды и оранжевый колпак Культа Солнца, надеваются зелёные штаны и фиолетовые перчатки
 // базового набора), выбрать нагрудник, надеть тунику, выбрать
-// оранжевые кеды, надеть их, выбрать шлем, закрыть окно. Последний запуск снимает игрока в мире и возвращает профиль, каким он был
+// оранжевые кеды, надеть их, выбрать шлем (камера к лицу) и колпак, надеть его, закрыть окно. Последний запуск снимает игрока в мире и возвращает профиль, каким он был
 // до первого шага (ключ Profile.v1 копируется в PlayerPrefs и обратно).
 // Перед запуском: editor_play, editor_focus, set_autotick --enable true (CLAUDE.md, «Проверка после правки кода»).
 // Запускать с паузой в секунду-две между шагами: окно проявляется, камера персонажа доезжает.
@@ -21,7 +21,7 @@ public static class ProbeEquipment
     const string Backup = "ProbeEquipment.backup";
     const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
 
-    static readonly string[] Steps = { "start", "open", "chest", "wear_tunic", "feet", "wear_boots", "head", "closed" };
+    static readonly string[] Steps = { "start", "open", "chest", "wear_tunic", "feet", "wear_boots", "head", "wear_head", "closed" };
 
     public static string Main()
     {
@@ -69,6 +69,7 @@ public static class ProbeEquipment
                 gear.Add(new GearPiece { kind = GearKind.NomadChest, quality = GearQuality.Green });
                 gear.Add(new GearPiece { kind = GearKind.SunShoes, quality = GearQuality.Blue });
                 gear.Add(new GearPiece { kind = GearKind.SunShoes, quality = GearQuality.Orange });
+                gear.Add(new GearPiece { kind = GearKind.SunHead, quality = GearQuality.Orange });
                 // Скрафченный базовый набор в цвете: ремни штанов и манжета перчаток красятся по маске
                 var pants = new GearPiece { kind = GearKind.ClothPantsRope, quality = GearQuality.Green };
                 var gloves = new GearPiece { kind = GearKind.ClothGloves, quality = GearQuality.Purple };
@@ -95,6 +96,10 @@ public static class ProbeEquipment
                 break;
             case "head":
                 Call(screen, "SelectSlot", GearSlot.Head);
+                Call(screen, "SelectCard", GearKind.SunHead, GearQuality.Orange);
+                break;
+            case "wear_head":
+                Call(screen, "WearSelected");
                 break;
             case "closed":
                 Call(screen, "Close");

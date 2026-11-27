@@ -155,6 +155,8 @@ public static class SetupEquipment
         GearKind.ClothGloves or GearKind.NomadGloves => (12f, -35f, true),
         GearKind.ClothBoots or GearKind.NomadBoots or GearKind.SunShoes => (16f, -38f, true),
         GearKind.ClothPantsRope or GearKind.NomadPants or GearKind.SunPants => (6f, -22f, false),
+        // сверху сбоку: видны лучи над обручем и полоса через макушку
+        GearKind.SunHead => (22f, -30f, false),
         _ => (8f, -24f, false),
     };
 
@@ -432,8 +434,9 @@ public static class SetupEquipment
         for (int i = 0; i < slots.Length; i++)
             slots[i] = BuildSlot(slotColumn, (GearSlot)i);
 
-        var riskSummary = Label("Risk Summary", window, body, "", 22, Risk, TextAnchor.UpperLeft);
-        Place(riskSummary.rectTransform, new Vector2(0f, 1f), new Vector2(98f, -876f), new Vector2(436f, 90f));
+        // все пять слотов в цвете - четыре строки: место до подписи «I или Esc» внизу
+        var riskSummary = Label("Risk Summary", window, body, "", 20, Risk, TextAnchor.UpperLeft);
+        Place(riskSummary.rectTransform, new Vector2(0f, 1f), new Vector2(98f, -876f), new Vector2(436f, 120f));
         riskSummary.horizontalOverflow = HorizontalWrapMode.Wrap;
         var footer = Label("Footer", window, body, "I  или  Esc  —  закрыть", 22, Muted, TextAnchor.LowerLeft);
         Place(footer.rectTransform, new Vector2(0f, 0f), new Vector2(98f, 44f), new Vector2(600f, 30f));
